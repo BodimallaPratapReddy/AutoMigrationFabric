@@ -1,0 +1,97 @@
+C:\Users\pratap.bodimalla\apps\Temporal>git clone https://github.com/temporalio/samples-server.git
+Cloning into 'samples-server'...
+remote: Enumerating objects: 1017, done.
+remote: Counting objects: 100% (265/265), done.
+remote: Compressing objects: 100% (134/134), done.
+remote: Total 1017 (delta 185), reused 135 (delta 129), pack-reused 752 (from 2)
+Receiving objects: 100% (1017/1017), 1003.27 KiB | 12.23 MiB/s, done.
+Resolving deltas: 100% (512/512), done.
+
+C:\Users\pratap.bodimalla\apps\Temporal>dir
+ Volume in drive C is Windows
+ Volume Serial Number is 56A6-C5D5
+
+ Directory of C:\Users\pratap.bodimalla\apps\Temporal
+
+25-09-2026  06.15 PM    <DIR>          .
+25-09-2026  06.15 PM    <DIR>          ..
+25-09-2026  06.15 PM    <DIR>          samples-server
+               0 File(s)              0 bytes
+               3 Dir(s)  359,050,543,104 bytes free
+
+C:\Users\pratap.bodimalla\apps\Temporal>cd samples-server
+
+C:\Users\pratap.bodimalla\apps\Temporal\samples-server>dir
+ Volume in drive C is Windows
+ Volume Serial Number is 56A6-C5D5
+
+ Directory of C:\Users\pratap.bodimalla\apps\Temporal\samples-server
+
+25-09-2026  06.15 PM    <DIR>          .
+25-09-2026  06.15 PM    <DIR>          ..
+25-09-2026  06.15 PM                18 .gitattributes
+25-09-2026  06.15 PM    <DIR>          .github
+25-09-2026  06.15 PM                44 .gitignore
+25-09-2026  06.15 PM    <DIR>          cloud
+25-09-2026  06.15 PM    <DIR>          compose
+25-09-2026  06.15 PM    <DIR>          extensibility
+25-09-2026  06.15 PM             1,128 LICENSE
+25-09-2026  06.15 PM             1,342 README.md
+25-09-2026  06.15 PM    <DIR>          tls
+               4 File(s)          2,532 bytes
+               7 Dir(s)  359,049,756,672 bytes free
+
+C:\Users\pratap.bodimalla\apps\Temporal\samples-server>cd compose
+
+C:\Users\pratap.bodimalla\apps\Temporal\samples-server\compose>ls
+'ls' is not recognized as an internal or external command,
+operable program or batch file.
+
+C:\Users\pratap.bodimalla\apps\Temporal\samples-server\compose>dir
+ Volume in drive C is Windows
+ Volume Serial Number is 56A6-C5D5
+
+ Directory of C:\Users\pratap.bodimalla\apps\Temporal\samples-server\compose
+
+25-09-2026  06.15 PM    <DIR>          .
+25-09-2026  06.15 PM    <DIR>          ..
+25-09-2026  06.15 PM               323 .env
+25-09-2026  06.15 PM    <DIR>          deployment
+25-09-2026  06.15 PM             3,514 docker-compose-cass-es.yml
+25-09-2026  06.15 PM               310 docker-compose-dev.yml
+25-09-2026  06.15 PM            11,780 docker-compose-multirole.yaml
+25-09-2026  06.15 PM             3,737 docker-compose-mysql-es.yml
+25-09-2026  06.15 PM             2,643 docker-compose-mysql.yml
+25-09-2026  06.15 PM             3,964 docker-compose-postgres-opensearch.yml
+25-09-2026  06.15 PM             2,734 docker-compose-postgres.yml
+25-09-2026  06.15 PM             6,020 docker-compose-tls.yml
+25-09-2026  06.15 PM               638 docker-compose-validate-multirole.yml
+25-09-2026  06.15 PM               632 docker-compose-validate.yml
+25-09-2026  06.15 PM             3,828 docker-compose.yml
+25-09-2026  06.15 PM    <DIR>          dynamicconfig
+25-09-2026  06.15 PM             6,666 README.md
+25-09-2026  06.15 PM    <DIR>          scripts
+25-09-2026  06.15 PM    <DIR>          tls
+              13 File(s)         46,789 bytes
+               6 Dir(s)  359,046,467,584 bytes free
+
+C:\Users\pratap.bodimalla\apps\Temporal\samples-server\compose>docker compose -f docker-compose-postgres.yml up -d
+[+] up 44/44
+ ✔ Image temporalio/admin-tools:1.31.0 Pulled                                                                      33.6s
+ ✔ Image temporalio/ui:2.49.1          Pulled                                                                      24.9s
+ ✔ Image postgres:16                   Pulled                                                                      29.9s
+ ✔ Image temporalio/server:1.31.0      Pulled                                                                      25.6s
+ ✔ Network temporal-network            Created                                                                      0.0s
+ ✔ Container temporal-postgresql       Healthy                                                                      6.9s
+ ✔ Container temporal-admin-tools      Exited                                                                       8.8s
+ ✔ Container temporal                  Healthy                                                                     14.4s
+ ✔ Container temporal-ui               Started                                                                     14.5s
+ ✔ Container temporal-create-namespace Started                                                                     14.5s
+
+C:\Users\pratap.bodimalla\apps\Temporal\samples-server\compose>docker ps
+CONTAINER ID   IMAGE                      COMMAND                  CREATED              STATUS                        PORTS                                         NAMES
+9ff88510638b   temporalio/ui:2.49.1       "./start-ui-server.sh"   About a minute ago   Up About a minute             0.0.0.0:8080->8080/tcp, [::]:8080->8080/tcp   temporal-ui
+1cda629c6d1e   temporalio/server:1.31.0   "/etc/temporal/entry…"   About a minute ago   Up About a minute (healthy)   0.0.0.0:7233->7233/tcp, [::]:7233->7233/tcp   temporal
+d5a4c5271b09   postgres:16                "docker-entrypoint.s…"   About a minute ago   Up About a minute (healthy)   0.0.0.0:5432->5432/tcp, [::]:5432->5432/tcp   temporal-postgresql
+
+C:\Users\pratap.bodimalla\apps\Temporal\samples-server\compose>

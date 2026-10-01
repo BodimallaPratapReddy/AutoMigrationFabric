@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "fabric-api"
+version = "0.1.0"
+description = "A FastAPI application"
+requires-python = ">=3.11"
+dependencies = [
+    "azure-identity",
+    "fastapi[standard]",
+    "httpx",
+    "mssql-python>=1.11.0",
+    "openai>=2.0.0",
+    "opentelemetry-api>=1.30.0",
+    "arize-phoenix-otel>=0.10.0",
+    "oracledb>=2.0.0",
+    "python-dotenv",
+]
+
+[tool.setuptools.packages.find]
+include = ["app*", "thirdparty*", "services*"]
+
+[tool.fastapi]
+entrypoint = "app.main:app"
