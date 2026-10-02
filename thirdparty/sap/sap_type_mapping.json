@@ -1,0 +1,22 @@
+{
+  "length_bound_types": {
+    "CHAR": "VARCHAR",
+    "NUMC": "VARCHAR",
+    "LANG": "VARCHAR",
+    "CUKY": "VARCHAR"
+  },
+  "fixed_types": {
+    "STRING": "VARCHAR(MAX)",
+    "DATS": "VARCHAR(8)",
+    "TIMS": "TIME",
+    "INT1": "SMALLINT",
+    "INT2": "SMALLINT",
+    "INT4": "INT",
+    "INT8": "BIGINT",
+    "FLTP": "FLOAT",
+    "RAWSTRING": "VARBINARY(MAX)"
+  },
+  "decimal_types": ["DEC", "CURR", "QUAN"],
+  "binary_length_types": ["RAW"],
+  "default_type": "VARCHAR(MAX)"
+}

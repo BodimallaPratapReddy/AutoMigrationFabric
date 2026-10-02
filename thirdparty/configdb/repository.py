@@ -38,9 +38,12 @@ class PlanStatus(StrEnum):
     FAILED = "FAILED"
     REJECTED = "REJECTED"
     SUPERSEDED = "SUPERSEDED"
+    CANCELLED = "CANCELLED"
+    CHANGE_REQUESTED = "CHANGE_REQUESTED"
+    CHANGE_APPLIED = "CHANGE_APPLIED"
 
 
-_SECRET_KEYS = {"password", "passwd", "client_secret", "secret", "access_token", "token"}
+_SECRET_KEYS = {"passwd", "client_secret", "secret", "access_token", "token"}
 
 
 class DBConnectionCreate(DBRow):
@@ -51,12 +54,12 @@ class DBConnectionCreate(DBRow):
     is_active: bool = Field(default=True, alias="IsActive")
 
     @model_validator(mode="after")
-    def no_plaintext_secrets(self) -> "DBConnectionCreate":
+    def restrict_secret_fields(self) -> "DBConnectionCreate":
         def inspect(value: object) -> None:
             if isinstance(value, dict):
                 for key, child in value.items():
                     if key.lower() in _SECRET_KEYS:
-                        raise ValueError("connection details must use external secret references")
+                        raise ValueError("unsupported secret field in connection details")
                     inspect(child)
             elif isinstance(value, list):
                 for child in value:
@@ -197,6 +200,7 @@ class ReplicationConfigCreate(DBRow):
     write_strategy: Literal["APPEND", "UPSERT", "SCD1", "SCD2", "REPLACE"] = Field(default="APPEND", alias="WriteStrategy")
     watermark_column: str | None = Field(default=None, alias="WatermarkColumn")
     watermark_column_data_type: str | None = Field(default=None, alias="WatermarkColumnDataType")
+    watermark_index_name: str | None = Field(default=None, alias="WatermarkIndexName")
     primary_key_columns: list[str] | None = Field(default=None, alias="PrimaryKeyColumns")
     merge_key_columns: list[str] | None = Field(default=None, alias="MergeKeyColumns")
     effective_from_column: str | None = Field(default=None, alias="EffectiveFromColumn")
@@ -211,6 +215,8 @@ class ReplicationConfigCreate(DBRow):
     def check_strategy(self) -> "ReplicationConfigCreate":
         if self.incremental_method == "WATERMARK" and not (self.watermark_column and self.watermark_column_data_type):
             raise ValueError("WATERMARK requires column and datatype")
+        if self.watermark_index_name and not self.watermark_column:
+            raise ValueError("watermark index requires a watermark column")
         if self.write_strategy in {"UPSERT", "SCD1", "SCD2"} and not (self.merge_key_columns or self.primary_key_columns):
             raise ValueError("merge strategy requires key columns")
         return self
@@ -717,10 +723,22 @@ class ConfigDBRepository(ConfigDB):
                 if cursor.rowcount != 1:
                     raise ValueError("analysis does not exist or is already superseded")
 
-    def start_batch_run(self, run: BatchRunCreate) -> UUID:
-        guid = uuid4()
+    def start_batch_run(self, run: BatchRunCreate, *, batch_run_id: UUID | None = None) -> UUID:
+        guid = batch_run_id or uuid4()
         with self.transaction() as connection:
             with connection.cursor() as cursor:
+                if batch_run_id is not None:
+                    cursor.execute(
+                        "SELECT BatchType, PlanGUID, TemporalWorkflowId, TemporalRunId "
+                        "FROM bronze_replication.BatchRuns WITH (UPDLOCK, HOLDLOCK) "
+                        "WHERE BatchRunId = ?", (str(guid),))
+                    existing = cursor.fetchone()
+                    if existing is not None:
+                        if (existing[0], str(existing[1]), existing[2], existing[3]) != (
+                                run.batch_type, str(run.plan_guid), run.temporal_workflow_id,
+                                run.temporal_run_id):
+                            raise ValueError("batch run ID is already used for another request")
+                        return guid
                 self._insert(cursor, "BatchRuns", {
                     "BatchRunId": guid, **run.model_dump(by_alias=True, exclude_none=True)})
         return guid
@@ -834,10 +852,26 @@ class ConfigDBRepository(ConfigDB):
                 if cursor.rowcount != 1:
                     raise ValueError("batch run is not running")
 
-    def start_batch_object_run(self, run: BatchObjectRunCreate) -> UUID:
-        guid = uuid4()
+    def start_batch_object_run(self, run: BatchObjectRunCreate,
+                               *, batch_object_run_id: UUID | None = None) -> UUID:
+        guid = batch_object_run_id or uuid4()
         with self.transaction() as connection:
             with connection.cursor() as cursor:
+                if batch_object_run_id is not None:
+                    cursor.execute(
+                        "SELECT BatchRunId, ObjectType, ObjectGUID, ObjectName "
+                        "FROM bronze_replication.BatchObjectRuns WITH (UPDLOCK, HOLDLOCK) "
+                        "WHERE BatchObjectRunId = ?", (str(guid),))
+                    existing = cursor.fetchone()
+                    if existing is not None:
+                        requested = (run.batch_run_id, run.object_type,
+                                     run.object_guid, run.object_name)
+                        actual = (UUID(str(existing[0])), existing[1],
+                                  UUID(str(existing[2])) if existing[2] else None,
+                                  existing[3])
+                        if actual != requested:
+                            raise ValueError("batch object run ID is already used for another request")
+                        return guid
                 self._insert(cursor, "BatchObjectRuns", {
                     "BatchObjectRunId": guid, **run.model_dump(by_alias=True, exclude_none=True)})
         return guid
@@ -919,7 +953,8 @@ class ConfigDBRepository(ConfigDB):
             with connection.cursor() as cursor:
                 cursor.execute(
                     "SELECT ReplicationConfigGUID, SourceTableGUID, IncrementalMethod, "
-                    "WatermarkColumn, WatermarkColumnDataType, WriteStrategy, PrimaryKeyColumns, "
+                    "WatermarkColumn, WatermarkColumnDataType, WatermarkIndexName, "
+                    "WriteStrategy, PrimaryKeyColumns, "
                     "MergeKeyColumns, EffectiveFromColumn, EffectiveToColumn, CurrentFlagColumn, "
                     "MaxRowFetch, IngestionFlag, PipelineWorkspaceId, PipelineItemId "
                     "FROM bronze_replication.ReplicationConfig WHERE SourceTableGUID = ?",
@@ -1073,6 +1108,55 @@ class ConfigDBRepository(ConfigDB):
                     "WHERE PlanGUID = ? ORDER BY CreatedTimestamp, GUID", (str(plan_guid),))
                 return self._rows(cursor, SourceTableRecord)
 
+    def list_target_table_records(self, *, workspace_id: str, lakehouse_id: str,
+                                  schema_name: str, table_name: str,
+                                  exclude_plan_guid: UUID) -> list[SourceTableRecord]:
+        """Find active saved definitions, including plans not provisioned yet."""
+        with self.connect() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    f"SELECT {self._TABLE_COLUMNS} FROM bronze_replication.SourceTables "
+                    "WHERE FabricWorkspaceId = ? AND FabricLakehouseId = ? "
+                    "AND FabricLakehouseSchema = ? AND FabricTableName = ? "
+                    "AND IsActive = 1 AND PlanGUID <> ? "
+                    "ORDER BY ProvisionedTimestamp DESC, CreatedTimestamp DESC, GUID DESC",
+                    (workspace_id, lakehouse_id, schema_name, table_name,
+                     str(exclude_plan_guid)))
+                return self._rows(cursor, SourceTableRecord)
+
+    def record_target_change_request(self, plan_guid: UUID, *, expected_version: int,
+                                     actor: str, decision: str, target_guid: UUID,
+                                     review: dict, proposed_plan: dict) -> None:
+        """Store the choice without implying that Fabric DDL or backfill ran."""
+        if decision not in {"REVISE_PLANNED", "ALTER_FUTURE", "ALTER_BACKFILL", "REPLACE_FULL"}:
+            raise ValueError("unsupported target change decision")
+        notes = json.dumps({"target_change": {"decision": decision,
+            "existing_source_table_guid": str(target_guid), "review": review,
+            "proposed_plan": proposed_plan}},
+            sort_keys=True, separators=(",", ":"))
+        with self.transaction() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    "UPDATE bronze_replication.MigrationPlans SET Status = 'CHANGE_REQUESTED', "
+                    "ApprovedBy = ?, ApprovedTimestamp = SYSUTCDATETIME(), Notes = ?, "
+                    "UpdatedTimestamp = SYSUTCDATETIME() WHERE PlanGUID = ? "
+                    "AND Status = 'WAITING_PLAN_APPROVAL' AND PlanVersion = ?",
+                    (actor, notes, str(plan_guid), expected_version))
+                if cursor.rowcount != 1:
+                    raise ValueError("plan is no longer awaiting target review")
+
+    def list_provisioned_target_tables(self, workspace_id: str,
+                                       lakehouse_id: str) -> list[str]:
+        """Targets already registered as provisioned in this Lakehouse."""
+        with self.connect() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    "SELECT FabricTableName FROM bronze_replication.SourceTables "
+                    "WHERE FabricWorkspaceId = ? AND FabricLakehouseId = ? "
+                    "AND ProvisioningStatus = 'PROVISIONED' AND IsActive = 1",
+                    (workspace_id, lakehouse_id))
+                return [str(row[0]) for row in cursor.fetchall()]
+
     def list_source_table_columns(self, source_table_guid: UUID) -> list[SourceTableColumnRecord]:
         with self.connect() as connection:
             with connection.cursor() as cursor:
@@ -1167,10 +1251,25 @@ class ConfigDBRepository(ConfigDB):
             for view in self.list_fabric_views_for_plan(plan_guid)]
         return ApprovedPlanRuntimeConfig(plan=plan, tables=tables, views=views)
 
-    def create_migration_plan(self, plan: MigrationPlanCreate) -> UUID:
-        guid = uuid4()
+    def create_migration_plan(self, plan: MigrationPlanCreate,
+                              *, plan_guid: UUID | None = None) -> UUID:
+        guid = plan_guid or uuid4()
         with self.transaction() as connection:
             with connection.cursor() as cursor:
+                if plan_guid is not None:
+                    cursor.execute(
+                        "SELECT SourceConnectionName, SourceSystemType, SourceObjectType, "
+                        "SourceObjectName, MigrationApproach "
+                        "FROM bronze_replication.MigrationPlans WITH (UPDLOCK, HOLDLOCK) "
+                        "WHERE PlanGUID = ?", (str(guid),))
+                    existing = cursor.fetchone()
+                    if existing is not None:
+                        requested = (plan.source_connection_name, plan.source_system_type,
+                                     plan.source_object_type, plan.source_object_name,
+                                     plan.migration_approach)
+                        if tuple(existing) != requested:
+                            raise ValueError("plan GUID is already used for another request")
+                        return guid
                 self._insert(cursor, "MigrationPlans", {
                     "PlanGUID": guid, **plan.model_dump(by_alias=True, exclude_none=True)})
         return guid
@@ -1202,6 +1301,19 @@ class ConfigDBRepository(ConfigDB):
                     )
                 if row[0] != "APPROVED" or row[4] is not None:
                     raise ValueError("plan is not awaiting runtime persistence")
+                for source in plan.tables:
+                    if source.table.source_system_type != "ORACLE":
+                        continue
+                    cursor.execute(
+                        "SELECT GUID FROM bronze_replication.SourceTables WITH (UPDLOCK, HOLDLOCK) "
+                        "WHERE FabricWorkspaceId = ? AND FabricLakehouseId = ? "
+                        "AND FabricLakehouseSchema = ? AND FabricTableName = ? "
+                        "AND IsActive = 1 AND PlanGUID <> ?",
+                        (source.table.fabric_workspace_id, source.table.fabric_lakehouse_id,
+                         source.table.fabric_lakehouse_schema, source.table.fabric_table_name,
+                         str(plan.plan_guid)))
+                    if cursor.fetchone() is not None:
+                        raise ValueError("target already has an active saved configuration; review its schema first")
                 for table_id, source in zip(table_ids, plan.tables, strict=True):
                     table_values = source.table.model_dump(by_alias=True, exclude_none=True)
                     if source.table.parent_source_index is not None:

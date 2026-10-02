@@ -17,10 +17,15 @@ dependencies = [
     "arize-phoenix-otel>=0.10.0",
     "oracledb>=2.0.0",
     "python-dotenv",
+    "temporalio>=1.10,<2",
 ]
 
 [tool.setuptools.packages.find]
 include = ["app*", "thirdparty*", "services*"]
+
+[tool.setuptools.package-data]
+"thirdparty.oracle" = ["oracle_type_mapping.json"]
+"thirdparty.sap" = ["sap_type_mapping.json"]
 
 [tool.fastapi]
 entrypoint = "app.main:app"

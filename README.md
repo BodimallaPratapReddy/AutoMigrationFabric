@@ -2,6 +2,113 @@
 
 A minimal FastAPI application with a health endpoint and interactive API documentation.
 
+## Temporal migration control
+
+The API now serves a thin migration control page at `/` and four migration start
+routes under `/migrations`. Workflow status, approvals, feedback, cancellation,
+and Config DB batch audit are available through the API. The browser never
+connects to Temporal directly.
+
+Use **Create connection** on the migration page to register an Oracle or SAP ECC
+source in Config DB. Select the source connection first; the migration type
+list then comes from `thirdparty/configdb/migration_types.json`. The API serves
+that mapping at `GET /migrations/options` and checks it against the selected
+connection before starting a workflow. The file can hide implemented migration
+types, but cannot add a new workflow route without code. The form saves the
+endpoint, username, and password in
+`DBConnections.ConnectionDetails`. Protect the Config DB and use HTTPS for
+remote access to the API. The connection list and create responses omit the
+password. The API exposes `GET /connections` and `POST /connections` for this UI.
+The Fabric workspace selector reads active rows from
+`bronze_replication.FabricWorkspaces` through `GET /workspaces`; the option
+submits `WorkspaceId` while displaying `WorkspaceName`. Selecting a workspace
+loads the Lakehouse dropdown from Fabric through
+`GET /workspaces/{workspace_id}/lakehouses`; it submits the selected Lakehouse ID.
+
+Start a Temporal development server, then run the worker and API in separate
+terminals:
+
+```powershell
+temporal server start-dev
+.\venv\Scripts\python -m app.migration.worker
+.\venv\Scripts\fastapi dev
+```
+
+Set `TEMPORAL_ADDRESS` and `TEMPORAL_NAMESPACE` for a nondefault server. The
+worker and API share `MIGRATION_TASK_QUEUE` (default `migration-workflows`).
+Install the project again after updating to pull in `temporalio`.
+Keep the worker running alongside the API; starting the API alone queues workflows
+without scheduling any activities. In Command Prompt, run
+`venv\Scripts\python.exe -m app.migration.worker` in a separate window.
+Already queued workflows resume when that worker connects to the same Temporal
+server, namespace, and task queue.
+
+The provisioning notebook ID is optional. With no notebook ID, approval saves
+the plan and the workflow ends in `PLANNED` state; Fabric provisioning does not
+run. With a notebook ID, the workflow provisions the approved Fabric structure
+and makes the table eligible for a separately scheduled replication pipeline.
+The migration workflow does not submit a pipeline job or load source rows.
+
+Source-to-Fabric type mappings come from
+`thirdparty/oracle/oracle_type_mapping.json` and
+`thirdparty/sap/sap_type_mapping.json`. Explicit numeric precision and scale
+still map to `DECIMAL(p,s)` when Fabric can represent them. Unbounded Oracle
+`NUMBER` uses the Oracle file's `STRING` default and appears with a warning in
+the plan review. Restart workers after changing either JSON file.
+
+Oracle review now has two steps. First, review source columns and edit any
+proposed Fabric type in the grid. Supported overrides are the basic Lakehouse
+types (`STRING`, `BINARY`, `BOOLEAN`, `DATE`, `TIMESTAMP`, integer and floating
+point types) and `DECIMAL(p,s)` with precision up to 38. Confirming the grid
+does not yet persist the plan. Second, choose **Full load** or one of the
+discovered timestamp/date watermark columns; the UI can return to the grid
+before final approval. A watermark choice requires a source primary key; the
+plan stores `IncrementalMethod=WATERMARK`,
+`WriteStrategy=UPSERT`, the selected column and type, and `WatermarkIndexName`
+when Oracle reports an index on that column. Existing Config DB installations
+need `thirdparty/configdb/migrations/002_watermark_index_name.sql` once before
+the updated worker persists new plans. A workflow started without a provisioning
+notebook only saves this configuration; it does not perform a replication run or
+advance `ReplicationState.LastWatermarkValue`.
+
+After Oracle mapping and watermark approval, the worker also checks active saved
+configurations for the same Fabric target, including `PENDING` plans. An identical
+structure ends as `DUPLICATE_TARGET` without saving another runtime row. A changed
+structure opens a separate target review: revise a pending plan, alter for future
+data, alter and backfill history, or replace and fully reload. The chosen change
+and proposed plan are recorded in `MigrationPlans.Notes` with status
+`CHANGE_REQUESTED`. When a provisioning notebook ID is set, the workflow now
+submits that approved change to Fabric and records the notebook report. A
+previously closed `CHANGE_REQUESTED` workflow remains a saved approval; start
+a new Oracle migration workflow to execute a new approved change. Apply
+`thirdparty/configdb/migrations/003_target_change_runs.sql` before running
+`ALTER_BACKFILL` or `REPLACE_FULL`, and restart the API and worker after this
+code update. The current comparison uses
+Config DB columns and cannot establish whether the physical Fabric table has
+drifted or whether an unregistered table exists; the notebook checks the
+physical schema before applying a change. See the
+[target change notebook contract](thirdparty/fabric/TARGET_CHANGE_NOTEBOOK_CONTRACT.md)
+for Oracle lock and recovery requirements.
+
+Source activities load credentials from the selected active Config DB connection.
+Existing connection records without a username and password still use the
+worker's Oracle or SAP environment profile; for those records set
+`ORACLE_CONNECTION_NAME` or `SAP_CONNECTION_NAME` to the selected name. Passwords
+are resolved inside activities and are not put in Temporal workflow inputs.
+
+The `SAP_REBUILD` route requires `MIGRATION_ANALYSIS_MODEL` and model credentials
+for Fabric plan proposals. Function module analysis uses the same LLM adapter
+and Phoenix tracing, then verifies proposed source objects against SAP before
+approval. Class-based and other unsupported extraction routes fail explicitly.
+The deterministic TABLE, DB_VIEW, and INFOSET analysis paths reject feedback
+revisions; only function module analysis currently supports the analysis
+feedback loop. Fabric plan feedback works for all supported rebuild routes.
+
+Before live execution, verify the deployed provisioning notebook exit contract
+in a nonproduction Fabric workspace. The repository's adapter tests do not
+prove the deployed notebook. The API has no authentication layer yet; keep it on a trusted local
+or internal network until authentication and authorization are added.
+
 ## Run locally
 
 ```powershell

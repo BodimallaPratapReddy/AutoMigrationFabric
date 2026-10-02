@@ -81,14 +81,16 @@ class ConfigDB:
             timeout=int(os.getenv("CONFIG_DB_CONNECT_TIMEOUT", "30")),
         )
 
-    def list_fabric_workspaces(self) -> list[FabricWorkspace]:
-        """Return every configured Fabric workspace, ordered by database Id."""
+    def list_fabric_workspaces(self, *, active_only: bool = False) -> list[FabricWorkspace]:
+        """Return configured Fabric workspaces, optionally excluding inactive rows."""
         with self.connect() as connection:
             with connection.cursor() as cursor:
                 cursor.execute(
                     "SELECT Id, WorkspaceName, WorkspaceId, "
                     "CreatedTimestamp, UpdatedTimestamp "
-                    "FROM bronze_replication.FabricWorkspaces ORDER BY Id"
+                    "FROM bronze_replication.FabricWorkspaces "
+                    + ("WHERE IsActive = 1 " if active_only else "")
+                    + ("ORDER BY WorkspaceName, Id" if active_only else "ORDER BY Id")
                 )
                 rows = cursor.fetchall()
 

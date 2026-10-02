@@ -1,0 +1,118 @@
+{
+  "fixed_types": {
+    "VARCHAR": "STRING",
+    "VARCHAR2": "STRING",
+    "CHAR": "STRING",
+    "NVARCHAR2": "STRING",
+    "NCHAR": "STRING",
+    "CLOB": "STRING",
+    "NCLOB": "STRING",
+    "LONG": "STRING",
+    "RAW": "BINARY",
+    "LONG RAW": "BINARY",
+    "BLOB": "BINARY",
+    "FLOAT": "DOUBLE",
+    "BINARY_FLOAT": "FLOAT",
+    "BINARY_DOUBLE": "DOUBLE",
+    "INTEGER": "BIGINT",
+    "INT": "BIGINT",
+    "SMALLINT": "BIGINT",
+    "ROWID": "STRING",
+    "UROWID": "STRING"
+  },
+  "number_rules": {
+    "source_type": "NUMBER",
+    "integer_scale": 0,
+    "integer_precision_rules": [
+      {
+        "max_precision": 9,
+        "target_type": "INT"
+      },
+      {
+        "max_precision": 18,
+        "target_type": "BIGINT"
+      },
+      {
+        "max_precision": 38,
+        "target_type_template": "DECIMAL({precision},0)"
+      }
+    ],
+    "scale_overflow_rules": [
+      {
+        "min_scale": 39,
+        "target_type": "DOUBLE",
+        "supported": true,
+        "lossy": false,
+        "warning": "Oracle NUMBER scale exceeds Fabric DECIMAL maximum scale of 38. Stored as DOUBLE to preserve the source value."
+      }
+    ],
+    "decimal_target_template": "DECIMAL({precision},{scale})",
+    "unbounded_number_target": "STRING",
+    "unbounded_number_warning": "Oracle NUMBER has no declared precision or scale. Stored as STRING to avoid assumptions about numeric range and scale.",
+    "negative_scale_rule": {
+      "target_type_template": "DECIMAL({adjusted_precision},0)",
+      "adjusted_precision_formula": "precision + abs(scale)",
+      "max_target_precision": 38,
+      "overflow_target": "STRING",
+      "supported": true,
+      "lossy": false,
+      "warning": "Oracle NUMBER with negative scale increases required integer precision. Use adjusted precision = precision + abs(scale). If adjusted precision exceeds 38, store as STRING."
+    }
+  },
+  "date_exact_types": [
+    "DATE"
+  ],
+  "date_target": "TIMESTAMP",
+  "timestamp_rules": {
+    "prefix": "TIMESTAMP",
+    "target_type": "TIMESTAMP",
+    "preserve_source_precision_in_metadata": true,
+    "timezone_variants": {
+      "TIMESTAMP WITH TIME ZONE": {
+        "target_type": "TIMESTAMP",
+        "lossy": true,
+        "warning": "Timezone information may not be preserved in the Fabric target."
+      },
+      "TIMESTAMP WITH LOCAL TIME ZONE": {
+        "target_type": "TIMESTAMP",
+        "lossy": true,
+        "warning": "Oracle local-time-zone semantics may not be preserved in the Fabric target."
+      }
+    }
+  },
+  "interval_types": {
+    "INTERVAL YEAR TO MONTH": {
+      "target_type": "STRING",
+      "lossy": true,
+      "warning": "Interval is stored as STRING unless an explicit transformation is configured."
+    },
+    "INTERVAL DAY TO SECOND": {
+      "target_type": "STRING",
+      "lossy": true,
+      "warning": "Interval is stored as STRING unless an explicit transformation is configured."
+    }
+  },
+  "unsupported_or_review_types": {
+    "BFILE": {
+      "target_type": "STRING",
+      "supported": false,
+      "warning": "BFILE requires explicit migration handling."
+    },
+    "XMLTYPE": {
+      "target_type": "STRING",
+      "supported": false,
+      "warning": "XMLTYPE requires explicit serialization or transformation."
+    },
+    "SDO_GEOMETRY": {
+      "target_type": "STRING",
+      "supported": false,
+      "warning": "Spatial data requires explicit serialization or spatial handling."
+    }
+  },
+  "default_mapping": {
+    "target_type": "STRING",
+    "supported": false,
+    "lossy": true,
+    "warning": "No explicit Oracle-to-Fabric mapping exists for this source datatype. Review is required."
+  }
+}

@@ -48,6 +48,23 @@ class ConfigDBTests(unittest.TestCase):
         connection.__exit__.assert_called_once()
 
     @patch("thirdparty.configdb.utils.load_dotenv")
+    def test_list_active_fabric_workspaces(self, _: Mock) -> None:
+        db = ConfigDB("Server=example;Database=config")
+        connection = MagicMock()
+        cursor = connection.__enter__.return_value.cursor.return_value.__enter__.return_value
+        cursor.fetchall.return_value = []
+
+        with patch.object(db, "connect", return_value=connection):
+            assert db.list_fabric_workspaces(active_only=True) == []
+
+        cursor.execute.assert_called_once_with(
+            "SELECT Id, WorkspaceName, WorkspaceId, "
+            "CreatedTimestamp, UpdatedTimestamp "
+            "FROM bronze_replication.FabricWorkspaces "
+            "WHERE IsActive = 1 ORDER BY WorkspaceName, Id"
+        )
+
+    @patch("thirdparty.configdb.utils.load_dotenv")
     def test_insert_table_and_columns_in_shared_transaction(self, _: Mock) -> None:
         db = ConfigDB("Server=example;Database=config")
         connection = MagicMock()

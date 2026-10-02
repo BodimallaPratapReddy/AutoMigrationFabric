@@ -74,11 +74,21 @@ class ConfigDBRepositoryTests(unittest.TestCase):
             ReplicationConfigCreate(write_strategy="UPSERT")
         with self.assertRaises(ValidationError):
             ReplicationConfigCreate(incremental_method="WATERMARK")
+        with self.assertRaises(ValidationError):
+            ReplicationConfigCreate(watermark_index_name="IX_UPDATED")
+        config = ReplicationConfigCreate(incremental_method="WATERMARK",
+                                         watermark_column="UPDATED_AT",
+                                         watermark_column_data_type="DATE",
+                                         watermark_index_name="IX_UPDATED")
+        self.assertEqual(config.model_dump(by_alias=True)["WatermarkIndexName"], "IX_UPDATED")
 
-    def test_connection_details_reject_plaintext_secrets(self):
+    def test_connection_details_allow_source_password_but_reject_other_secrets(self):
+        record = DBConnectionCreate(source_type="ORACLE", connection_name="prod",
+                                    connection_details={"username": "scott", "password": "tiger"})
+        self.assertEqual(record.connection_details["password"], "tiger")
         with self.assertRaises(ValidationError):
             DBConnectionCreate(source_type="ORACLE", connection_name="prod",
-                               connection_details={"host": "db", "auth": {"password": "secret"}})
+                               connection_details={"host": "db", "auth": {"access_token": "secret"}})
 
     @patch("thirdparty.configdb.utils.load_dotenv")
     def test_planned_view_dependency_resolves_created_table_guid(self, _):

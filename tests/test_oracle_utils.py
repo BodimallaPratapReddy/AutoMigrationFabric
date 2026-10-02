@@ -61,12 +61,15 @@ class OracleClientTests(unittest.TestCase):
             OracleTableColumn(ID=1, COLUMN_NAME="ID", DATATYPE="NUMBER", DESC=None),
             OracleTableColumn(ID=2, COLUMN_NAME="LAST_UPDATE_DATE", DATATYPE="DATE", DESC=None,
                               DATA_TYPE="DATE", NULLABLE=0),
+            OracleTableColumn(ID=3, COLUMN_NAME="CHANGED_AT", DATATYPE="TIMESTAMP", DESC=None,
+                              DATA_TYPE="TIMESTAMP(6)", NULLABLE=0),
         ]
         with patch.object(client, "get_table_schema", return_value=columns), \
              patch.object(client, "get_indexes", return_value=[]):
             candidates = client.get_watermark_candidates("ONT", "ORDERS")
-        self.assertEqual([item.column_name for item in candidates], ["LAST_UPDATE_DATE"])
+        self.assertEqual([item.column_name for item in candidates], ["LAST_UPDATE_DATE", "CHANGED_AT"])
         self.assertFalse(candidates[0].nullable)
+        self.assertEqual(candidates[1].data_type, "TIMESTAMP")
 
     def test_execute_sql_returns_json_and_closes_connection(self) -> None:
         settings = OracleConnectionSettings(

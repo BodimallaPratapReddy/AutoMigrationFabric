@@ -211,6 +211,9 @@ CREATE TABLE bronze_replication.MigrationPlans
     -- FAILED
     -- REJECTED
     -- SUPERSEDED
+    -- CANCELLED
+    -- CHANGE_REQUESTED (approved structural change awaiting Fabric notebook)
+    -- CHANGE_APPLIED (approved structural change applied by Fabric notebook)
 
     ApprovedBy              nvarchar(256) NULL,
     ApprovedTimestamp       datetime2 NULL,
@@ -601,6 +604,8 @@ CREATE TABLE bronze_replication.ReplicationConfig
 
     WatermarkColumnDataType   varchar(100) NULL,
 
+    WatermarkIndexName        varchar(256) NULL,
+
     WriteStrategy             varchar(50) NOT NULL
         CONSTRAINT DF_ReplicationConfig_WriteStrategy DEFAULT ('APPEND'),
     -- APPEND
@@ -722,6 +727,32 @@ CREATE TABLE bronze_replication.ReplicationState
     CONSTRAINT CK_ReplicationState_RowsWritten
         CHECK (RowsWritten IS NULL OR RowsWritten >= 0)
 );
+GO
+
+/* Durable data-change guard. For an existing database apply migration 003. */
+CREATE TABLE bronze_replication.TargetChangeRuns
+(
+    PlanGUID uniqueidentifier NOT NULL PRIMARY KEY,
+    SourceTableGUID uniqueidentifier NOT NULL,
+    Action varchar(30) NOT NULL,
+    Phase varchar(30) NOT NULL,
+    StageTableName nvarchar(256) NOT NULL,
+    SnapshotSCN bigint NULL,
+    SourceRows bigint NULL,
+    CreatedTimestamp datetime2 NOT NULL DEFAULT SYSUTCDATETIME(),
+    UpdatedTimestamp datetime2 NOT NULL DEFAULT SYSUTCDATETIME(),
+    CONSTRAINT FK_TargetChangeRuns_Plan FOREIGN KEY (PlanGUID)
+        REFERENCES bronze_replication.MigrationPlans(PlanGUID),
+    CONSTRAINT FK_TargetChangeRuns_Table FOREIGN KEY (SourceTableGUID)
+        REFERENCES bronze_replication.SourceTables(GUID),
+    CONSTRAINT CK_TargetChangeRuns_Action CHECK (Action IN ('ALTER_BACKFILL', 'REPLACE_FULL')),
+    CONSTRAINT CK_TargetChangeRuns_Phase CHECK
+        (Phase IN ('STARTED', 'STAGED', 'MUTATION_STARTED', 'COMPLETED'))
+);
+GO
+
+CREATE INDEX IX_TargetChangeRuns_SourceTable
+ON bronze_replication.TargetChangeRuns (SourceTableGUID, CreatedTimestamp DESC);
 GO
 
 
@@ -1145,6 +1176,7 @@ SELECT
     rc.IncrementalMethod,
     rc.WatermarkColumn,
     rc.WatermarkColumnDataType,
+    rc.WatermarkIndexName,
 
     rc.WriteStrategy,
 
