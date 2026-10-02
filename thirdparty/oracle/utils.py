@@ -464,7 +464,7 @@ class OracleClient:
             if creation_only:
                 priority = min(priority, 5)
             candidates.append(OracleWatermarkCandidate(
-                column_name=column.column_name, data_type=data_type,
+                column_name=column.column_name, data_type=column.datatype.upper(),
                 indexed=is_indexed, leading_index_column=name in leading,
                 index_details=index_details,
                 nullable=column.nullable if column.nullable is not None else True,
@@ -557,6 +557,7 @@ class OracleClient:
             "THEN c.data_type || '(' || c.data_precision || ',' || c.data_scale || ')' "
             "WHEN c.data_type = 'NUMBER' AND c.data_precision IS NOT NULL "
             "THEN c.data_type || '(' || c.data_precision || ')' "
+            "WHEN c.data_type LIKE 'TIMESTAMP%' THEN 'TIMESTAMP' "
             "ELSE c.data_type END AS datatype, cc.comments AS \"DESC\", "
             "c.data_type, c.data_length, c.char_length, c.data_precision, "
             "c.data_scale, CASE WHEN c.nullable = 'Y' THEN 1 ELSE 0 END AS nullable "

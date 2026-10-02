@@ -1,10 +1,11 @@
 """Project contract for a completed Fabric provisioning notebook run."""
 
 import json
+from datetime import datetime
 from typing import Literal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 from thirdparty.fabric.models import FabricJobInstance, FabricJobStatus
 
@@ -31,6 +32,19 @@ class ProvisioningLogicalFailure(ProvisioningNotebookError):
         self.result = result
 
 
+class ProvisionedObjectResult(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    object_type: Literal["TABLE", "VIEW"]
+    name: str = Field(min_length=1)
+    status: Literal["SUCCESS", "FAILED", "SKIPPED"]
+    duration_seconds: float = Field(ge=0)
+    started_at: datetime | None = None
+    completed_at: datetime | None = None
+    rows_written: int | None = Field(default=None, ge=0, strict=True)
+    message: str | None = None
+
+
 class ProvisioningNotebookResult(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -38,7 +52,25 @@ class ProvisioningNotebookResult(BaseModel):
     plan_guid: UUID
     tables_processed: int | None = Field(default=None, ge=0, strict=True)
     views_processed: int | None = Field(default=None, ge=0, strict=True)
+    duration_seconds: float | None = Field(default=None, ge=0)
+    objects: list[ProvisionedObjectResult] | None = None
     message: str | None = None
+
+    @model_validator(mode="after")
+    def check_report(self) -> "ProvisioningNotebookResult":
+        if self.objects is None:
+            return self
+        if self.status == "SUCCESS" and any(item.status != "SUCCESS" for item in self.objects):
+            raise ValueError("successful run cannot contain failed or skipped objects")
+        tables = sum(item.object_type == "TABLE" and item.status == "SUCCESS"
+                     for item in self.objects)
+        views = sum(item.object_type == "VIEW" and item.status == "SUCCESS"
+                    for item in self.objects)
+        if self.tables_processed is not None and self.tables_processed != tables:
+            raise ValueError("table count does not match object report")
+        if self.views_processed is not None and self.views_processed != views:
+            raise ValueError("view count does not match object report")
+        return self
 
 
 def parse_provisioning_notebook_result(

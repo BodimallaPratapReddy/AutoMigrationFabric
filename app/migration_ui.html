@@ -1,0 +1,571 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Fabric migration control</title>
+  <style>
+    :root { font-family: system-ui, Segoe UI, sans-serif; color: #183047; background: #f3f6f9; }
+    * { box-sizing: border-box; }
+    body { margin: 0; }
+    header { background: #102c42; color: white; padding: 22px max(24px, calc((100vw - 1100px)/2)); }
+    h1 { margin: 0; font-size: 1.35rem; }
+    header p { margin: 5px 0 0; color: #bcd4e0; }
+    main { max-width: 1100px; margin: 28px auto; padding: 0 20px; display: grid; gap: 20px; grid-template-columns: minmax(280px, 390px) 1fr; }
+    section { background: white; border: 1px solid #d6e1e9; border-radius: 12px; padding: 22px; box-shadow: 0 4px 12px #153a5210; }
+    h2 { margin: 0 0 16px; font-size: 1.13rem; }
+    label { display: block; font-size: .88rem; font-weight: 600; margin: 12px 0 5px; }
+    input, select, textarea { width: 100%; padding: 9px 11px; border: 1px solid #a8bac8; border-radius: 7px; font: inherit; color: inherit; background: white; }
+    textarea { min-height: 86px; resize: vertical; }
+    button { border: 0; border-radius: 7px; padding: 10px 14px; font: inherit; font-weight: 650; background: #14678a; color: white; cursor: pointer; }
+    button:hover { background: #0a5071; }
+    button.secondary { background: #e8eef2; color: #183047; }
+    button.danger { background: #a73f46; }
+    button:disabled { opacity: .5; cursor: default; }
+    .actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 15px; }
+    .wide { grid-column: 1 / -1; }
+    .hidden { display: none; }
+    .status { display: grid; grid-template-columns: 160px 1fr; gap: 7px 12px; margin: 0; }
+    .status dt { color: #5c7181; }
+    .status dd { margin: 0; overflow-wrap: anywhere; font-weight: 600; }
+    .badge { display: inline-block; border-radius: 20px; padding: 4px 10px; background: #e2eef4; }
+    .error { color: #aa2934; font-weight: 600; min-height: 1.5em; }
+    pre { white-space: pre-wrap; overflow-wrap: anywhere; background: #f6f9fb; border: 1px solid #dce6ec; padding: 15px; border-radius: 8px; max-height: 580px; overflow: auto; }
+    .grid-scroll { overflow-x: auto; }
+    .mapping-grid { width: 100%; border-collapse: collapse; text-align: left; }
+    .mapping-grid th, .mapping-grid td { border-bottom: 1px solid #dce6ec; padding: 10px; vertical-align: top; }
+    .mapping-grid th { background: #f2f6f8; }
+    .mapping-grid input { min-width: 155px; }
+    .mapping-grid .muted { font-size: .82rem; }
+    #unsupported-ack-wrap input { width: auto; margin-right: 8px; }
+    .muted { color: #607685; }
+    @media (max-width: 780px) { main { grid-template-columns: 1fr; } .wide { grid-column: 1; } }
+  </style>
+</head>
+<body>
+  <header><h1>Fabric migration control</h1><p>Start, review, and monitor durable migrations</p></header>
+  <main>
+    <section>
+      <h2>New migration</h2>
+      <form id="start-form">
+        <label for="connection">Source connection</label>
+        <select id="connection" name="source_connection_name" required><option value="">Loading connections…</option></select>
+        <div class="actions"><button id="new-connection" type="button" class="secondary">Create connection</button></div>
+        <p id="connection-list-message" class="muted"></p>
+        <label for="approach">Migration type</label>
+        <select id="approach" name="migration_approach" required disabled>
+          <option value="">Select a source connection first</option>
+        </select>
+        <div id="schema-wrap"><label for="schema">Oracle source schema</label><input id="schema" name="source_schema_name"></div>
+        <label id="source-label" for="source">Source table or DataSource</label><input id="source" name="source_object_name" required>
+        <label for="workspace">Fabric workspace</label>
+        <select id="workspace" name="fabric_workspace_id" required disabled>
+          <option value="">Loading workspaces…</option>
+        </select>
+        <p id="workspace-list-message" class="muted"></p>
+        <label for="lakehouse">Lakehouse</label>
+        <select id="lakehouse" name="fabric_lakehouse_id" required disabled>
+          <option value="">Select a workspace first</option>
+        </select>
+        <p id="lakehouse-list-message" class="muted"></p>
+        <label for="fabric-schema">Fabric schema</label><input id="fabric-schema" name="fabric_schema_name" required>
+        <label for="target">Target name (optional)</label><input id="target" name="fabric_target_name">
+        <label for="notebook">Provisioning notebook ID (optional)</label><input id="notebook" name="provisioning_notebook_id" value="5b8a6415-f6b9-4890-8bc5-226528914c59" placeholder="UUID, or leave blank">
+        <p class="muted">Without a notebook ID, the workflow saves the approved plan and stops before provisioning. Data loading runs later in the separately scheduled replication pipeline.</p>
+        <label for="requester">Requested by (optional)</label><input id="requester" name="requested_by">
+        <div class="actions"><button type="submit">Start migration</button></div>
+      </form>
+    </section>
+    <section>
+      <h2>Migration status</h2>
+      <label for="lookup">Workflow ID</label><input id="lookup" placeholder="oracle-table-…">
+      <div class="actions"><button id="load" type="button" class="secondary">Load status</button><button id="cancel" type="button" class="danger hidden">Cancel migration</button></div>
+      <p id="message" class="error" role="alert"></p>
+      <p id="empty" class="muted">Start a migration or enter a workflow ID.</p>
+      <dl id="status" class="status hidden"></dl>
+    </section>
+    <section id="connection-section" class="wide hidden">
+      <h2>Create source connection</h2>
+      <p class="muted">Connection details, including the password, are saved in Config DB. Restrict access to that database and use HTTPS when accessing this page remotely.</p>
+      <form id="connection-form">
+        <label for="connection-type">Source type</label>
+        <select id="connection-type" name="source_type"><option value="ORACLE">Oracle</option><option value="SAP_ECC">SAP ECC</option></select>
+        <label for="connection-name">Connection name</label><input id="connection-name" name="connection_name" maxlength="200" required>
+        <label for="connection-username">Username</label><input id="connection-username" name="username" autocomplete="off" required>
+        <label for="connection-password">Password</label><input id="connection-password" name="password" type="password" autocomplete="new-password" required>
+        <div id="oracle-connection-fields">
+          <label for="oracle-dsn">Oracle DSN</label><input id="oracle-dsn" name="dsn" placeholder="host:1521/service">
+          <p class="muted">Use a DSN, or fill in host and service name below.</p>
+          <label for="oracle-host">Oracle host</label><input id="oracle-host" name="oracle_host">
+          <label for="oracle-port">Oracle port</label><input id="oracle-port" name="oracle_port" type="number" min="1" max="65535" value="1521">
+          <label for="oracle-service">Service name</label><input id="oracle-service" name="service_name">
+        </div>
+        <div id="sap-connection-fields" class="hidden">
+          <label for="sap-host">SAP host</label><input id="sap-host" name="sap_host" placeholder="sap.example.com">
+          <label for="sap-port">SAP HTTPS port</label><input id="sap-port" name="sap_port" type="number" min="1" max="65535">
+          <label for="sap-client">SAP client</label><input id="sap-client" name="sap_client" placeholder="100">
+        </div>
+        <label for="connection-tags">Tags (optional, comma separated)</label><input id="connection-tags" name="tags">
+        <p id="connection-message" class="error" role="alert"></p>
+        <div class="actions"><button type="submit">Save connection</button><button id="close-connection" type="button" class="secondary">Close</button></div>
+      </form>
+    </section>
+    <section id="review-section" class="wide hidden">
+      <h2 id="review-title">Review</h2>
+      <pre id="review"></pre>
+      <div id="column-grid-wrap" class="grid-scroll hidden">
+        <p class="muted">Review each Oracle column and edit its Fabric type where needed. Confirm these mappings to continue to watermark selection.</p>
+        <table class="mapping-grid">
+          <thead><tr><th>Source column</th><th>Oracle type</th><th>Fabric type</th><th>Mapping note</th></tr></thead>
+          <tbody id="column-grid-body"></tbody>
+        </table>
+        <label id="unsupported-ack-wrap" class="hidden"><input id="unsupported-ack" type="checkbox">
+          I reviewed the unsupported Oracle mappings and accept responsibility for their selected Fabric types.
+        </label>
+        <datalist id="fabric-type-options">
+          <option value="STRING"><option value="BINARY"><option value="BOOLEAN">
+          <option value="DATE"><option value="TIMESTAMP"><option value="TINYINT">
+          <option value="SMALLINT"><option value="INT"><option value="BIGINT">
+          <option value="FLOAT"><option value="DOUBLE"><option value="DECIMAL(18,0)">
+        </datalist>
+      </div>
+      <div id="watermark-wrap" class="hidden">
+        <label for="watermark">Oracle replication method</label>
+        <select id="watermark"></select>
+        <p id="watermark-description" class="muted"></p>
+      </div>
+      <div id="target-change-wrap" class="hidden">
+        <p id="target-change-summary"></p>
+        <pre id="target-change-diff"></pre>
+        <label for="target-change-decision">How should this target change?</label>
+        <select id="target-change-decision"></select>
+        <p class="muted">With a provisioning notebook selected, approval applies the Fabric change. Data loading remains separately scheduled.</p>
+      </div>
+      <label for="actor">Your name</label><input id="actor" autocomplete="name">
+      <p id="review-message" class="error" role="alert"></p>
+      <div id="feedback-wrap" class="hidden"><label for="feedback">Feedback</label><textarea id="feedback" placeholder="Describe the change needed"></textarea></div>
+      <div class="actions">
+        <button id="approve" type="button">Approve</button>
+        <button id="edit-columns" type="button" class="secondary hidden">Edit column mappings</button>
+        <button id="feedback-send" type="button" class="secondary hidden">Submit feedback</button>
+        <button id="reject" type="button" class="danger">Reject</button>
+      </div>
+    </section>
+    <section id="audit-section" class="wide hidden">
+      <h2>Execution monitor</h2>
+      <pre id="audit"></pre>
+    </section>
+    <section id="provisioning-report-section" class="wide hidden">
+      <h2>Provisioning report</h2>
+      <pre id="provisioning-report"></pre>
+    </section>
+  </main>
+  <script>
+    const $ = id => document.getElementById(id);
+    let current = null;
+    let timer = null;
+    let refreshInProgress = false;
+    let connections = [];
+    let workspaces = [];
+    let lakehouses = [];
+    let lakehouseRequestVersion = 0;
+    const routes = {ORACLE_TABLE:'oracle-table', SAP_TABLE:'sap-table', SAP_ODP:'sap-odp', SAP_REBUILD:'sap-rebuild'};
+    let approachesBySource = {};
+    const display = value => value == null ? '—' : String(value);
+    function setMessage(message) { $('message').textContent = message || ''; }
+    const watermarkType = candidate => candidate.data_type?.startsWith('TIMESTAMP') ? 'TIMESTAMP' : candidate.data_type;
+    function setReviewMessage(message) {
+      $('review-message').textContent = message || '';
+      setMessage(message);
+    }
+    function renderColumnGrid() {
+      const body = $('column-grid-body');
+      if (body.dataset.workflowId === current.workflow_id) return;
+      body.replaceChildren();
+      for (const column of current.review.columns || []) {
+        const row = document.createElement('tr');
+        const name = document.createElement('td'); name.textContent = column.name;
+        const source = document.createElement('td'); source.textContent = column.source_type;
+        const typeCell = document.createElement('td');
+        const input = document.createElement('input');
+        input.value = column.fabric_type;
+        input.dataset.columnName = column.name;
+        input.setAttribute('list', 'fabric-type-options');
+        input.setAttribute('aria-label', `Fabric type for ${column.name}`);
+        input.required = true;
+        typeCell.append(input);
+        const note = document.createElement('td');
+        note.className = 'muted'; note.textContent =
+          `${column.supported === false ? 'Requires review. ' : ''}${column.warning || ''}`;
+        if (column.supported === false || column.lossy) row.style.backgroundColor = '#fff3df';
+        row.append(name, source, typeCell, note);
+        body.append(row);
+      }
+      $('unsupported-ack-wrap').classList.toggle('hidden',
+        !(current.review.columns || []).some(column => column.supported === false));
+      $('unsupported-ack').checked = false;
+      body.dataset.workflowId = current.workflow_id;
+    }
+    function showWatermarkChoice() {
+      const choice = $('watermark').value;
+      const candidate = (current?.review?.watermark_candidates || []).find(item => item.column_name === choice);
+      const preferred = candidate ? [...candidate.index_details].sort((a, b) =>
+        (a.column_position !== 1) - (b.column_position !== 1) ||
+        a.index_name.localeCompare(b.index_name)) : [];
+      if (current?.review) {
+        const preview = {...current.review,
+          load_method: candidate ? 'WATERMARK' : choice === '__FULL__' ? 'FULL' : 'Choose above',
+          write_strategy: candidate ? 'UPSERT' : 'REPLACE',
+          selected_watermark: candidate?.column_name || null,
+          selected_watermark_index: preferred[0]?.index_name || null};
+        $('review').textContent = JSON.stringify(preview, null, 2);
+      }
+      if (candidate) {
+        const indexes = candidate.index_details.map(item => item.index_name);
+        $('watermark-description').textContent = `${watermarkType(candidate)}; ${candidate.reason}. ` +
+          (indexes.length ? `Source index: ${indexes.join(', ')}. ` : 'No source index found. ') +
+          'The selected column and one index name will be saved with the replication plan.';
+      } else {
+        $('watermark-description').textContent = choice === '__FULL__' ?
+          'Full load with no watermark.' : 'Choose a column for watermark upserts, or choose full load.';
+      }
+    }
+    $('watermark').addEventListener('change', showWatermarkChoice);
+    const selectedSourceType = () => connections.find(item =>
+      item.connection_name === $('connection').value && item.is_active)?.source_type || null;
+    function renderApproaches(preserve = false) {
+      const previous = preserve ? $('approach').value : '';
+      const options = approachesBySource[selectedSourceType()] || [];
+      $('approach').replaceChildren(new Option(
+        options.length ? 'Select a migration type' : 'Select a source connection first', ''));
+      for (const {value, label} of options) $('approach').add(new Option(label, value));
+      $('approach').disabled = !options.length;
+      if (options.some(option => option.value === previous)) $('approach').value = previous;
+      showApproach();
+    }
+    function renderConnections(selectName) {
+      const previous = selectName || $('connection').value;
+      $('connection').replaceChildren();
+      const placeholder = document.createElement('option');
+      placeholder.value = ''; placeholder.textContent = 'Select a connection';
+      $('connection').append(placeholder);
+      for (const item of connections.filter(item => item.is_active && approachesBySource[item.source_type]?.length)) {
+        const option = document.createElement('option');
+        option.value = item.connection_name;
+        option.textContent = `${item.connection_name} (${item.source_type === 'ORACLE' ? 'Oracle' : 'SAP ECC'})`;
+        $('connection').append(option);
+      }
+      $('connection').value = connections.some(item => item.connection_name === previous && item.is_active &&
+        approachesBySource[item.source_type]?.length) ? previous : '';
+      $('connection-list-message').textContent = $('connection').options.length === 1 ?
+        'No active source connections. Create one below.' : '';
+      renderApproaches($('connection').value === previous && !selectName);
+    }
+    async function loadConnections(selectName) {
+      try {
+        [connections, approachesBySource] = await Promise.all([
+          request('/connections'), request('/migrations/options')]);
+        renderConnections(selectName);
+      }
+      catch (error) { $('connection-list-message').textContent = error.message; }
+    }
+    async function loadWorkspaces() {
+      try {
+        workspaces = await request('/workspaces');
+        const select = $('workspace');
+        const previous = select.value;
+        select.replaceChildren(new Option('Select a workspace', ''));
+        for (const item of workspaces)
+          select.add(new Option(`${item.workspace_name} (${item.workspace_id})`, item.workspace_id));
+        select.disabled = !workspaces.length;
+        if (workspaces.some(item => item.workspace_id === previous)) select.value = previous;
+        $('workspace-list-message').textContent = workspaces.length ? '' :
+          'No active Fabric workspaces are configured.';
+        await loadLakehouses();
+      } catch (error) {
+        $('workspace').replaceChildren(new Option('Workspaces unavailable', ''));
+        $('workspace').disabled = true;
+        $('workspace-list-message').textContent = error.message;
+        await loadLakehouses();
+      }
+    }
+    async function loadLakehouses() {
+      const workspaceId = $('workspace').value;
+      const requestVersion = ++lakehouseRequestVersion;
+      const select = $('lakehouse');
+      lakehouses = [];
+      select.disabled = true;
+      select.replaceChildren(new Option(
+        workspaceId ? 'Loading Lakehouses…' : 'Select a workspace first', ''));
+      $('lakehouse-list-message').textContent = '';
+      if (!workspaceId) return;
+      try {
+        const listed = await request(`/workspaces/${encodeURIComponent(workspaceId)}/lakehouses`);
+        if (requestVersion !== lakehouseRequestVersion || $('workspace').value !== workspaceId) return;
+        lakehouses = listed;
+        select.replaceChildren(new Option('Select a Lakehouse', ''));
+        for (const item of lakehouses)
+          select.add(new Option(`${item.lakehouse_name} (${item.lakehouse_id})`, item.lakehouse_id));
+        select.disabled = !lakehouses.length;
+        $('lakehouse-list-message').textContent = lakehouses.length ? '' :
+          'No Lakehouses are available in this workspace.';
+      } catch (error) {
+        if (requestVersion !== lakehouseRequestVersion || $('workspace').value !== workspaceId) return;
+        select.replaceChildren(new Option('Lakehouses unavailable', ''));
+        $('lakehouse-list-message').textContent = error.message;
+      }
+    }
+    $('workspace').addEventListener('change', loadLakehouses);
+    function showApproach() {
+      $('schema-wrap').classList.toggle('hidden', $('approach').value !== 'ORACLE_TABLE');
+      $('source-label').textContent = ({ORACLE_TABLE: 'Oracle source table',
+        SAP_TABLE: 'SAP source table', SAP_ODP: 'SAP ODP DataSource',
+        SAP_REBUILD: 'SAP DataSource'})[$('approach').value] || 'Source table or DataSource';
+    }
+    function showConnectionFields() {
+      const oracle = $('connection-type').value === 'ORACLE';
+      $('oracle-connection-fields').classList.toggle('hidden', !oracle);
+      $('sap-connection-fields').classList.toggle('hidden', oracle);
+      for (const id of ['sap-host', 'sap-port', 'sap-client']) $(id).required = !oracle;
+    }
+    $('connection').addEventListener('change', () => {
+      $('source').value = '';
+      $('schema').value = '';
+      renderApproaches();
+    });
+    $('approach').addEventListener('change', () => {
+      $('source').value = '';
+      showApproach();
+    });
+    showApproach();
+    $('connection-type').addEventListener('change', showConnectionFields); showConnectionFields();
+    $('new-connection').addEventListener('click', () => {
+      $('connection-type').value = selectedSourceType() || 'ORACLE'; showConnectionFields();
+      $('connection-message').textContent = '';
+      $('connection-section').classList.remove('hidden');
+      $('connection-name').focus();
+    });
+    $('close-connection').addEventListener('click', () => $('connection-section').classList.add('hidden'));
+    async function request(path, options) {
+      const response = await fetch(path, options);
+      const body = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        const detail = Array.isArray(body.detail) ? body.detail.map(item => item.msg).join('; ') : body.detail;
+        throw new Error(typeof detail === 'string' ? detail : `Request failed (${response.status})`);
+      }
+      return body;
+    }
+    $('connection-form').addEventListener('submit', async event => {
+      event.preventDefault();
+      const form = new FormData(event.target);
+      const oracle = form.get('source_type') === 'ORACLE';
+      const body = {
+        source_type:form.get('source_type'), connection_name:form.get('connection_name').trim(),
+        username:form.get('username'), password:form.get('password'),
+        host:(oracle ? form.get('oracle_host') : form.get('sap_host')).trim() || null,
+        port:oracle && form.get('dsn').trim() ? null : Number(oracle ? form.get('oracle_port') : form.get('sap_port')) || null,
+        dsn:oracle ? form.get('dsn').trim() || null : null,
+        service_name:oracle ? form.get('service_name').trim() || null : null,
+        sap_client:oracle ? null : form.get('sap_client').trim() || null,
+        tags:form.get('tags').split(',').map(value => value.trim()).filter(Boolean),
+      };
+      try {
+        const created = await request('/connections', {method:'POST',
+          headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)});
+        await loadConnections(created.connection_name);
+        $('connection-message').textContent = '';
+        $('connection-section').classList.add('hidden');
+        $('connection-form').reset(); showConnectionFields();
+        $('connection-list-message').textContent = `Saved ${created.connection_name}.`;
+      } catch (error) { $('connection-message').textContent = error.message; }
+    });
+    async function refresh() {
+      const id = $('lookup').value.trim();
+      if (!id || refreshInProgress) return;
+      refreshInProgress = true;
+      try {
+        current = await request(`/migrations/${encodeURIComponent(id)}`);
+        setMessage('');
+        $('empty').classList.add('hidden'); $('status').classList.remove('hidden');
+        const fields = [['Workflow ID', current.workflow_id], ['Migration type', current.migration_approach],
+          ['Source', current.source_object_name], ['Phase', current.phase], ['Status', current.status],
+          ['Message', current.current_message],
+          ['Plan GUID', current.plan_guid], ['Analysis version', current.analysis_version],
+          ['Plan version', current.plan_version], ['Provisioning job', current.fabric_job_instance_id],
+          ['Provisioning status', current.provisioning_status], ['Batch run', current.batch_run_id],
+          ['Error', current.last_error]];
+        $('status').replaceChildren();
+        for (const [key, value] of fields) { const dt = document.createElement('dt'); const dd = document.createElement('dd'); dt.textContent = key; dd.textContent = display(value); $('status').append(dt, dd); }
+        $('cancel').classList.toggle('hidden', current.status !== 'RUNNING');
+        $('provisioning-report-section').classList.toggle('hidden', !current.provisioning_report);
+        if (current.provisioning_report)
+          $('provisioning-report').textContent = JSON.stringify(current.provisioning_report, null, 2);
+        if (current.plan_guid) {
+          try {
+            const audit = await request(`/migrations/${encodeURIComponent(id)}/audit`);
+            $('audit').textContent = JSON.stringify(audit, null, 2);
+            $('audit-section').classList.remove('hidden');
+          } catch (_) { $('audit-section').classList.add('hidden'); }
+        }
+        const waiting = current.waiting_for_user && current.review;
+        $('review-section').classList.toggle('hidden', !waiting);
+        if (waiting) {
+          const analysis = current.phase === 'WAITING_FOR_ANALYSIS_APPROVAL';
+          const plan = current.phase === 'WAITING_FOR_FABRIC_PLAN_APPROVAL';
+          const mapping = current.phase === 'WAITING_FOR_COLUMN_MAPPING_APPROVAL';
+          const watermark = current.phase === 'WAITING_FOR_WATERMARK_APPROVAL';
+          const targetChange = current.phase === 'WAITING_FOR_TARGET_CHANGE_APPROVAL';
+          const canFeedback = plan || (analysis && current.review.route === 'FUNCTION_MODULE');
+          $('review-title').textContent = targetChange ? 'Existing target structure — change approval' :
+            mapping ? 'Oracle column mappings — step 1 of 2' :
+            watermark ? 'Oracle watermark — step 2 of 2' :
+            analysis ? 'SAP analysis review' : plan ? 'Fabric plan review' : 'Runtime plan review';
+          $('review').textContent = JSON.stringify(current.review, null, 2);
+          $('review').classList.toggle('hidden', mapping);
+          $('column-grid-wrap').classList.toggle('hidden', !mapping);
+          $('edit-columns').classList.toggle('hidden', !watermark);
+          $('approve').textContent = targetChange ? 'Record target change choice' :
+            mapping ? 'Confirm column mappings' :
+            watermark ? 'Confirm watermark and save plan' : 'Approve';
+          if (mapping) renderColumnGrid();
+          else $('column-grid-body').dataset.workflowId = '';
+          $('watermark-wrap').classList.toggle('hidden', !watermark);
+          $('target-change-wrap').classList.toggle('hidden', !targetChange);
+          if (targetChange) {
+            const review = current.review.target_review;
+            const selected = review.definitions.find(item => item.source_table_guid === review.selected_existing_guid);
+            $('target-change-summary').textContent = `${review.target.schema}.${review.target.table} has a ${
+              review.is_provisioned_record ? 'provisioned record' : 'saved plan'} (${selected.plan_guid}). ` +
+              'This comparison uses saved Config DB columns; the physical Fabric schema is unverified.';
+            const diff = selected.comparison;
+            $('target-change-diff').textContent = [
+              ...diff.added.map(item => `Added: ${item.name} ${item.fabric_type}`),
+              ...diff.removed.map(item => `Removed: ${item.name} ${item.fabric_type}`),
+              ...diff.changed.map(item => `Changed: ${item.before.name} ${item.before.fabric_type} → ${item.after.fabric_type}`)
+            ].join('\n') || 'No structural differences';
+            const options = review.is_provisioned_record ? [
+              ['ALTER_FUTURE', 'Alter columns; future data only'],
+              ['ALTER_BACKFILL', 'Alter columns and backfill history'],
+              ['REPLACE_FULL', 'Replace table and reload all history']
+            ] : [['REVISE_PLANNED', 'Revise the existing saved plan']];
+            const select = $('target-change-decision');
+            if (select.dataset.workflowId !== current.workflow_id) {
+              select.replaceChildren(new Option('Choose an action', ''),
+                ...options.map(([value, label]) => new Option(label, value)));
+              select.dataset.workflowId = current.workflow_id;
+            }
+          }
+          if (watermark && $('watermark').dataset.workflowId !== current.workflow_id) {
+            $('watermark').replaceChildren();
+            const initial = new Option('Choose a replication method', '');
+            const full = new Option('Full load (no watermark)', '__FULL__');
+            $('watermark').append(initial, full);
+            for (const candidate of current.review.watermark_candidates || []) {
+              const indexes = candidate.index_details.map(item => item.index_name);
+              const label = `${candidate.column_name} (${watermarkType(candidate)}; ${candidate.reason})` +
+                (indexes.length ? ` — index: ${indexes.join(', ')}` : ' — no index');
+              const option = new Option(label, candidate.column_name);
+              option.disabled = !(current.review.primary_key || []).length;
+              $('watermark').append(option);
+            }
+            $('watermark').dataset.workflowId = current.workflow_id;
+          }
+          if (watermark) showWatermarkChoice();
+          $('feedback-wrap').classList.toggle('hidden', !canFeedback);
+          $('feedback-send').classList.toggle('hidden', !canFeedback);
+        }
+        if (current.status !== 'RUNNING' && timer) { clearInterval(timer); timer = null; }
+      } catch (error) { setMessage(error.message); }
+      finally { refreshInProgress = false; }
+    }
+    $('start-form').addEventListener('submit', async event => {
+      event.preventDefault();
+      const data = Object.fromEntries(new FormData(event.target).entries());
+      const allowed = approachesBySource[selectedSourceType()] || [];
+      if (!allowed.some(option => option.value === data.migration_approach)) {
+        setMessage('Select a source connection and a matching migration type.');
+        return;
+      }
+      if (!workspaces.some(item => item.workspace_id === data.fabric_workspace_id)) {
+        setMessage('Select an active Fabric workspace.');
+        return;
+      }
+      if (!lakehouses.some(item => item.lakehouse_id === data.fabric_lakehouse_id)) {
+        setMessage('Select a Lakehouse in the selected workspace.');
+        return;
+      }
+      for (const key of ['source_schema_name', 'fabric_target_name', 'requested_by',
+        'provisioning_notebook_id']) if (!data[key]) data[key] = null;
+      try {
+        const started = await request(`/migrations/${routes[data.migration_approach]}`, {
+          method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(data)});
+        $('lookup').value = started.workflow_id;
+        localStorage.setItem('migrationWorkflowId', started.workflow_id);
+        setMessage(''); await refresh();
+        if (timer) clearInterval(timer); timer = setInterval(refresh, 5000);
+      } catch (error) { setMessage(error.message); }
+    });
+    $('load').addEventListener('click', async () => { await refresh(); if (timer) clearInterval(timer); timer = setInterval(refresh, 5000); });
+    async function sendAction(action) {
+      if (!current) return;
+      const analysis = current.phase === 'WAITING_FOR_ANALYSIS_APPROVAL';
+      const mapping = current.phase === 'WAITING_FOR_COLUMN_MAPPING_APPROVAL';
+      const watermark = current.phase === 'WAITING_FOR_WATERMARK_APPROVAL';
+      const targetChange = current.phase === 'WAITING_FOR_TARGET_CHANGE_APPROVAL';
+      const endpoint = action === 'feedback' ? (analysis ? 'analysis-feedback' : 'plan-feedback') :
+        `${action}-${targetChange ? 'target-change' : mapping ? 'columns' : watermark ? 'watermark' : analysis ? 'analysis' : 'plan'}`;
+      const actor = $('actor').value.trim();
+      if (!actor) { setReviewMessage('Enter your name.'); return; }
+      const body = action === 'feedback' ? {submitted_by:actor, message:$('feedback').value.trim()} :
+        {approved_by:actor};
+      if (action === 'approve' && mapping) {
+        body.columns = [...$('column-grid-body').querySelectorAll('input[data-column-name]')]
+          .map(input => ({name:input.dataset.columnName, fabric_type:input.value.trim()}));
+        if (body.columns.some(item => !item.fabric_type)) {
+          setReviewMessage('Enter a Fabric type for every column.'); return;
+        }
+        body.acknowledge_unsupported = $('unsupported-ack').checked;
+      }
+      if (action === 'approve' && watermark) {
+        const choice = $('watermark').value;
+        if (!choice) { setReviewMessage('Choose a watermark column or full load before approving.'); return; }
+        body.watermark_column = choice === '__FULL__' ? null : choice;
+      }
+      if (action === 'approve' && targetChange) {
+        body.decision = $('target-change-decision').value;
+        if (!body.decision) { setReviewMessage('Choose a target change action.'); return; }
+      }
+      if (action === 'feedback' && !body.message) { setReviewMessage('Enter feedback.'); return; }
+      try { await request(`/migrations/${encodeURIComponent(current.workflow_id)}/${endpoint}`, {
+        method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)});
+        $('feedback').value = ''; setReviewMessage('Action accepted. Waiting for workflow state…'); setTimeout(refresh, 800);
+      } catch (error) { setReviewMessage(error.message); }
+    }
+    $('approve').addEventListener('click', () => sendAction('approve'));
+    $('reject').addEventListener('click', () => sendAction('reject'));
+    $('edit-columns').addEventListener('click', async () => {
+      try {
+        await request(`/migrations/${encodeURIComponent(current.workflow_id)}/edit-columns`, {method:'POST'});
+        setReviewMessage('Returning to column mappings.'); setTimeout(refresh, 500);
+      } catch (error) { setReviewMessage(error.message); }
+    });
+    $('feedback-send').addEventListener('click', () => sendAction('feedback'));
+    $('cancel').addEventListener('click', async () => {
+      try { await request(`/migrations/${encodeURIComponent(current.workflow_id)}/cancel`, {method:'POST'}); setMessage('Cancellation requested.'); setTimeout(refresh, 800); }
+      catch (error) { setMessage(error.message); }
+    });
+    const linked = new URLSearchParams(window.location.search).get('workflow_id');
+    const saved = linked || localStorage.getItem('migrationWorkflowId');
+    loadConnections();
+    loadWorkspaces();
+    if (saved) {
+      $('lookup').value = saved;
+      refresh().then(() => {
+        if (linked && !$('review-section').classList.contains('hidden'))
+          $('review-section').scrollIntoView({behavior:'smooth'});
+      });
+      timer = setInterval(refresh, 5000);
+    }
+  </script>
+</body>
+</html>

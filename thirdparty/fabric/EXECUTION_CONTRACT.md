@@ -21,21 +21,34 @@ cancel endpoint. Cancellation returns `FabricCancellationSubmission` with any Lo
 and `Retry-After` headers. It is asynchronous; a 202 response does not mean the job is
 already cancelled. `UNKNOWN` status stays visible together with the raw status string.
 
+The migration workflow does not submit a replication pipeline job. The client
+methods below are available to a separate scheduler or loader.
+
 Replication pipeline scope is `GLOBAL_CONFIG_LOOKUP`: one submission processes all
 enabled, provisioned rows in the Config DB replication queue. The DataPipeline execute
 API documents no parameter body, so `run_pipeline` submits without a PlanGUID. The
 repository's `vw_ReplicationQueue` view implements this scope with `IngestionFlag = 1`
-and `ProvisioningStatus = 'PROVISIONED'`, without a PlanGUID filter. Before workflow
-use, verify that the deployed pipeline reads this view and applies the same scope.
+and `ProvisioningStatus = 'PROVISIONED'`, without a PlanGUID filter. Before scheduled
+loader use, verify that the deployed pipeline reads this view and applies the same scope.
 The adapter cannot establish that from its HTTP execution contract alone.
 
 The provisioning notebook must return a JSON string from its exit call with `status`
 (`SUCCESS` or `FAILED`) and the matching `plan_guid` UUID. Nonnegative
-`tables_processed` and `views_processed` counts and a `message` are optional. The
+`tables_processed` and `views_processed` counts and a `message` are optional.
+The notebook may also return `duration_seconds` and an `objects` array. Each
+object reports `object_type` (`TABLE` or `VIEW`), `name`, `status` (`SUCCESS`,
+`FAILED`, or `SKIPPED`), nonnegative `duration_seconds`, and optional
+`started_at`, `completed_at`, `rows_written`, and `message`. Counts, when
+present with `objects`, must match successful objects of each type. An overall
+`SUCCESS` cannot contain a failed or skipped object. The
 service parser in `services/fabric_provisioning.py` accepts this only for a successful
 Fabric job. A failed or cancelled Fabric job, a missing or malformed exit value, a
 different plan GUID, and a logical `FAILED` result each raise a distinct service
 error. The low-level client only surfaces the raw exit value.
+
+For existing Oracle targets, see [TARGET_CHANGE_NOTEBOOK_CONTRACT.md](TARGET_CHANGE_NOTEBOOK_CONTRACT.md).
+With a notebook ID, the current application submits an approved target change
+to that notebook and verifies its reported result.
 
 Reference: Microsoft [notebook submission](https://learn.microsoft.com/en-us/rest/api/fabric/notebook/background-jobs/run-on-demand-notebook),
 [notebook status](https://learn.microsoft.com/en-us/rest/api/fabric/notebook/background-jobs/get-notebook-job-instance%28beta%29),

@@ -378,13 +378,20 @@ class SAPClient:
         *,
         timeout: float = 30.0,
         ca_bundle: str | Path | None = None,
+        host: str | None = None,
+        port: int | str | None = None,
+        username: str | None = None,
+        password: str | None = None,
+        sap_client: str | None = None,
     ) -> None:
         load_dotenv()
-        host = os.getenv("SAP_HOST")
-        port = os.getenv("SAP_HTTPS_PORT")
-        username = os.getenv("SAP_USER")
-        password = os.getenv("SAP_PASSWORD")
-        sap_client = os.getenv("SAP_CLIENT")
+        explicit = any(value is not None for value in (host, port, username, password, sap_client))
+        if not explicit:
+            host = os.getenv("SAP_HOST")
+            port = os.getenv("SAP_HTTPS_PORT")
+            username = os.getenv("SAP_USER")
+            password = os.getenv("SAP_PASSWORD")
+            sap_client = os.getenv("SAP_CLIENT")
 
         missing = [
             name
@@ -400,6 +407,7 @@ class SAPClient:
         if missing:
             raise ValueError(f"Missing SAP configuration: {', '.join(missing)}")
 
+        port = str(port)
         if not port.isdigit() or not 1 <= int(port) <= 65535:
             raise ValueError("SAP_HTTPS_PORT must be a valid TCP port")
 
