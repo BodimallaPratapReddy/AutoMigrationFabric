@@ -10,10 +10,13 @@ from pydantic import BaseModel
 from temporalio.client import Client, WorkflowExecutionStatus
 from temporalio.service import RPCError, RPCStatusCode
 
-from .contracts import (ColumnMappingApproval, Decision, Feedback, MigrationInput,
-                        MigrationState, TargetChangeApproval, WatermarkApproval)
+from .contracts import (ColumnMappingApproval, Decision, DeletePolicyApproval, Feedback, MigrationInput,
+                        MigrationState, PrimaryKeyApproval, TargetChangeApproval, WatermarkApproval)
+from .primary_keys import validate_primary_key
+from thirdparty.delete_policy import validate_delete_policy
 from .migration_types import MigrationTypeOption, load_migration_types
 from .mapping_types import normalize_fabric_type
+from .target_review import allowed_target_decisions
 from .worker import TASK_QUEUE
 from thirdparty.configdb.repository import ConfigDBRepository
 from thirdparty.configdb.utils import ConfigDB
@@ -166,7 +169,9 @@ async def _command(client: Client, workflow_id: str, action: str,
                    watermark_column: str | None = None,
                    columns: list[dict] | None = None,
                    target_decision: str | None = None,
-                   acknowledge_unsupported: bool = False) -> dict:
+                   acknowledge_unsupported: bool = False,
+                   primary_key_columns: list[str] | None = None,
+                   delete_policy: dict | None = None) -> dict:
     state = await _state(client, workflow_id)
     phases = {
         "approve_plan": {"WAITING_FOR_PLAN_APPROVAL", "WAITING_FOR_FABRIC_PLAN_APPROVAL"},
@@ -176,6 +181,11 @@ async def _command(client: Client, workflow_id: str, action: str,
         "approve_watermark": {"WAITING_FOR_WATERMARK_APPROVAL"},
         "reject_watermark": {"WAITING_FOR_WATERMARK_APPROVAL"},
         "edit_columns": {"WAITING_FOR_WATERMARK_APPROVAL"},
+        "approve_primary_key": {"WAITING_FOR_PRIMARY_KEY_APPROVAL"},
+        "reject_primary_key": {"WAITING_FOR_PRIMARY_KEY_APPROVAL"},
+        "approve_delete_policy": {"WAITING_FOR_DELETE_POLICY_APPROVAL"},
+        "reject_delete_policy": {"WAITING_FOR_DELETE_POLICY_APPROVAL"},
+        "edit_primary_key": {"WAITING_FOR_WATERMARK_APPROVAL"},
         "approve_target_change": {"WAITING_FOR_TARGET_CHANGE_APPROVAL"},
         "reject_target_change": {"WAITING_FOR_TARGET_CHANGE_APPROVAL"},
         "plan_feedback": {"WAITING_FOR_FABRIC_PLAN_APPROVAL"},
@@ -188,6 +198,19 @@ async def _command(client: Client, workflow_id: str, action: str,
             raise HTTPException(409, "Workflow is already terminal")
     elif state.phase not in phases[action]:
         raise HTTPException(409, f"{action} is unavailable in {state.phase}")
+    if action in {"approve_primary_key", "edit_primary_key"}:
+        review = state.review or {}
+        if (state.migration_approach not in {"ORACLE_TABLE", "SAP_TABLE"}
+                or (review.get("primary_key_source") == "DATABASE"
+                    and (review.get("key_validation") or {}).get("valid") is not False)
+                or (review.get("primary_key") and not review.get("primary_key_source"))):
+            raise HTTPException(409, "Database primary keys cannot be replaced in this step")
+        if action == "approve_primary_key":
+            try:
+                primary_key_columns = validate_primary_key(
+                    primary_key_columns or [], [item["name"] for item in review.get("columns", [])])
+            except ValueError as exc:
+                raise HTTPException(422, str(exc)) from exc
     if (action == "analysis_feedback" and state.review
             and state.review.get("route") != "FUNCTION_MODULE"):
         raise HTTPException(409, "Analysis feedback is supported for function module routes")
@@ -208,21 +231,42 @@ async def _command(client: Client, workflow_id: str, action: str,
     if watermark_column is not None:
         candidates = (state.review or {}).get("watermark_candidates", [])
         if (action not in {"approve_plan", "approve_watermark"}
-                or state.migration_approach != "ORACLE_TABLE"
+                or state.migration_approach not in {"ORACLE_TABLE", "SAP_TABLE"}
                 or watermark_column not in {item["column_name"] for item in candidates}):
-            raise HTTPException(422, "Select a discovered Oracle watermark column")
+            raise HTTPException(422, "Select a discovered date or timestamp watermark column")
         if not state.review.get("primary_key"):
             raise HTTPException(422, "A primary key is required for watermark upserts")
+        if (state.review.get("key_validation_required")
+                and (state.review.get("key_validation") or {}).get("valid") is not True):
+            raise HTTPException(422, "Source key validation must succeed before watermark upserts")
     if action == "approve_target_change":
         review = (state.review or {}).get("target_review") or {}
         allowed = ({"ALTER_FUTURE", "ALTER_BACKFILL", "REPLACE_FULL"}
                    if review.get("is_provisioned_record") else {"REVISE_PLANNED"})
+        if state.migration_approach == "SAP_TABLE" or (state.review or {}).get("delete_policy_required"):
+            allowed = allowed_target_decisions(review)
         if target_decision not in allowed:
             raise HTTPException(422, "Choose an action valid for this target")
+    if action == "approve_delete_policy":
+        review = state.review or {}
+        if state.migration_approach != "ORACLE_TABLE":
+            raise HTTPException(409, "Delete policy approval is supported for Oracle tables")
+        try:
+            delete_policy = validate_delete_policy(delete_policy,
+                [item["name"] for item in review.get("columns", [])],
+                review.get("primary_key") or [], review.get("selected_watermark"))
+            if delete_policy["mode"] != "NONE" and (review.get("key_validation") or {}).get("valid") is not True:
+                raise ValueError("Validate source key fields before enabling delete propagation")
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
     command = {"action": action, "actor": actor, "message": message,
                "watermark_column": watermark_column, "columns": columns}
     if target_decision is not None:
         command["decision"] = target_decision
+    if primary_key_columns is not None:
+        command["primary_key_columns"] = primary_key_columns
+    if delete_policy is not None:
+        command["delete_policy"] = delete_policy
     await client.get_workflow_handle(workflow_id).signal("command", command)
     return {"accepted": True}
 
@@ -252,6 +296,36 @@ async def approve_watermark(workflow_id: str, approval: WatermarkApproval,
                             client: TemporalClient) -> dict:
     return await _command(client, workflow_id, "approve_watermark", approval.approved_by,
                           watermark_column=approval.watermark_column)
+
+
+@router.post("/{workflow_id}/approve-primary-key")
+async def approve_primary_key(workflow_id: str, approval: PrimaryKeyApproval,
+                              client: TemporalClient) -> dict:
+    return await _command(client, workflow_id, "approve_primary_key", approval.approved_by,
+                          primary_key_columns=approval.primary_key_columns)
+
+
+@router.post("/{workflow_id}/approve-delete-policy")
+async def approve_delete_policy(workflow_id: str, approval: DeletePolicyApproval,
+                                client: TemporalClient) -> dict:
+    return await _command(client, workflow_id, "approve_delete_policy", approval.approved_by,
+                          delete_policy=approval.delete_policy)
+
+
+@router.post("/{workflow_id}/reject-delete-policy")
+async def reject_delete_policy(workflow_id: str, decision: Decision, client: TemporalClient) -> dict:
+    return await _command(client, workflow_id, "reject_delete_policy", decision.approved_by, decision.comment)
+
+
+@router.post("/{workflow_id}/reject-primary-key")
+async def reject_primary_key(workflow_id: str, decision: Decision, client: TemporalClient) -> dict:
+    return await _command(client, workflow_id, "reject_primary_key", decision.approved_by,
+                          decision.comment)
+
+
+@router.post("/{workflow_id}/edit-primary-key")
+async def edit_primary_key(workflow_id: str, client: TemporalClient) -> dict:
+    return await _command(client, workflow_id, "edit_primary_key")
 
 
 @router.post("/{workflow_id}/reject-watermark")

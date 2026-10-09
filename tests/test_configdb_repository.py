@@ -14,6 +14,42 @@ from thirdparty.configdb.repository import (
 
 
 class ConfigDBRepositoryTests(unittest.TestCase):
+    @patch("thirdparty.configdb.utils.load_dotenv")
+    def test_sap_persistence_rejects_a_competing_active_target(self, _):
+        repository = ConfigDBRepository("fake")
+        plan = self.plan()
+        plan.tables[0].table.source_system_type = "SAP_ECC"
+        connection = MagicMock()
+        cursor = connection.cursor.return_value.__enter__.return_value
+        cursor.fetchone.side_effect = [("APPROVED", 2, "reviewer", datetime.utcnow(), None), (uuid4(),)]
+        with patch.object(repository, "connect", return_value=connection):
+            with self.assertRaisesRegex(ValueError, "active saved configuration"):
+                repository.persist_approved_runtime_plan(plan)
+        self.assertFalse(any("INSERT INTO" in call.args[0] for call in cursor.execute.call_args_list))
+        connection.rollback.assert_called_once()
+
+    @patch("thirdparty.configdb.utils.load_dotenv")
+    def test_wide_sap_plan_uses_bounded_column_batches(self, _):
+        repository = ConfigDBRepository("fake")
+        plan = self.plan()
+        plan.tables[0].table.source_system_type = "SAP_ECC"
+        plan.tables[0].columns = [SourceTableColumnCreate(
+            sno=i + 1, column_name=f"FIELD_{i}", source_data_type="CHAR(10,0)",
+            fabric_data_type="VARCHAR(10)") for i in range(225)]
+        connection = MagicMock()
+        cursor = connection.cursor.return_value.__enter__.return_value
+        cursor.fetchone.side_effect = [("APPROVED", 2, "reviewer", datetime.utcnow(), None), None, None]
+        cursor.rowcount = 1
+        with patch.object(repository, "connect", return_value=connection):
+            repository.persist_approved_runtime_plan(plan)
+        batches = [(sql, params) for sql, params in [c.args for c in cursor.execute.call_args_list]
+                   if "INSERT INTO bronze_replication.SourceTableColumns" in sql]
+        self.assertLess(len(batches), 5)
+        self.assertEqual(sum(sql.count(") VALUES ") and sql.split(") VALUES ")[1].count("(")
+                             for sql, _ in batches), 225)
+        self.assertTrue(all(len(params) <= 2000 for _, params in batches))
+        connection.commit.assert_called_once()
+
     def plan(self) -> ApprovedRuntimePlan:
         return ApprovedRuntimePlan(
             plan_guid=uuid4(), plan_version=2,
@@ -36,7 +72,7 @@ class ConfigDBRepositoryTests(unittest.TestCase):
         repository = ConfigDBRepository("fake")
         connection = MagicMock()
         cursor = connection.cursor.return_value.__enter__.return_value
-        cursor.fetchone.return_value = ("APPROVED", 2, "reviewer", datetime.utcnow(), None)
+        cursor.fetchone.side_effect = [("APPROVED", 2, "reviewer", datetime.utcnow(), None), None, None]
         cursor.rowcount = 1
         plan = self.plan()
         with patch.object(repository, "connect", return_value=connection):
@@ -57,7 +93,7 @@ class ConfigDBRepositoryTests(unittest.TestCase):
         repository = ConfigDBRepository("fake")
         connection = MagicMock()
         cursor = connection.cursor.return_value.__enter__.return_value
-        cursor.fetchone.return_value = ("APPROVED", 2, "reviewer", datetime.utcnow(), None)
+        cursor.fetchone.side_effect = [("APPROVED", 2, "reviewer", datetime.utcnow(), None), None, None]
         def execute(sql, params):
             if "INSERT INTO bronze_replication.SourceTableColumns" in sql:
                 raise RuntimeError("column insert failed")
@@ -95,7 +131,7 @@ class ConfigDBRepositoryTests(unittest.TestCase):
         repository = ConfigDBRepository("fake")
         connection = MagicMock()
         cursor = connection.cursor.return_value.__enter__.return_value
-        cursor.fetchone.return_value = ("APPROVED", 2, "reviewer", datetime.utcnow(), None)
+        cursor.fetchone.side_effect = [("APPROVED", 2, "reviewer", datetime.utcnow(), None), None, None]
         cursor.rowcount = 1
         plan = self.plan()
         plan.views.append(FabricViewPlan(
@@ -133,7 +169,7 @@ class ConfigDBRepositoryTests(unittest.TestCase):
         repository = ConfigDBRepository("fake")
         connection = MagicMock()
         cursor = connection.cursor.return_value.__enter__.return_value
-        cursor.fetchone.return_value = ("APPROVED", 2, "reviewer", datetime.utcnow(), None)
+        cursor.fetchone.side_effect = [("APPROVED", 2, "reviewer", datetime.utcnow(), None), None, None]
         cursor.rowcount = 1
         plan = self.plan()
         child = plan.tables[0].model_copy(deep=True)

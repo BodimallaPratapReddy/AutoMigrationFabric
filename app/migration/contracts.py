@@ -63,6 +63,17 @@ class WatermarkApproval(BaseModel):
     watermark_column: str | None
 
 
+class PrimaryKeyApproval(BaseModel):
+    approved_by: str = Field(min_length=1)
+    # An explicit empty list means the user chose "No primary key".
+    primary_key_columns: list[str]
+
+
+class DeletePolicyApproval(BaseModel):
+    approved_by: str = Field(min_length=1)
+    delete_policy: dict
+
+
 class TargetChangeApproval(BaseModel):
     approved_by: str = Field(min_length=1)
     decision: Literal["REVISE_PLANNED", "ALTER_FUTURE", "ALTER_BACKFILL", "REPLACE_FULL"]

@@ -42,6 +42,128 @@ class FakeClient:
         return self.handle
 
 
+def test_delete_approval_validates_key_field_values_interval_and_watermark_confirmation():
+    temporal = FakeClient()
+    temporal.handle.phase = "WAITING_FOR_DELETE_POLICY_APPROVAL"
+    original = temporal.handle.query
+    async def delete_review(name):
+        state = await original(name)
+        state["review"].update(key_validation={"valid": True, "columns": ["ORDER_ID"]},
+                               selected_watermark="LAST_UPDATED_DATE")
+        state["review"]["columns"].append({"name": "DELETED", "fabric_type": "STRING"})
+        return state
+    temporal.handle.query = delete_review
+    app.dependency_overrides[get_temporal_client] = lambda: temporal
+    policy = {"mode": "SOFT_DELETE_AND_RECONCILE", "behavior": "MARK",
+              "soft_delete_column": "DELETED", "soft_delete_values": ["Y"],
+              "watermark_tracks_soft_delete": True, "reconcile_interval_minutes": 1440}
+    try:
+        client = TestClient(app)
+        route = "/migrations/oracle-test/approve-delete-policy"
+        body = {"approved_by": "reviewer", "delete_policy": policy}
+        for change in [{"soft_delete_column": "MISSING"}, {"soft_delete_values": []},
+                       {"watermark_tracks_soft_delete": False}, {"reconcile_interval_minutes": -1}]:
+            assert client.post(route, json={**body, "delete_policy": {**policy, **change}}).status_code == 422
+        assert temporal.handle.signals == []
+        assert client.post(route, json=body).status_code == 200
+        saved = temporal.handle.signals[-1][1]["delete_policy"]
+        assert saved["reconcile_require_complete_snapshot"] is True
+        assert saved["soft_delete_values"] == ["Y"]
+        temporal.handle.phase = "WAITING_FOR_WATERMARK_APPROVAL"
+        assert client.post(route, json=body).status_code == 409
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_failed_database_key_check_allows_an_explicit_no_key_decision():
+    temporal = FakeClient()
+    temporal.handle.phase = "WAITING_FOR_PRIMARY_KEY_APPROVAL"
+    original = temporal.handle.query
+    async def failed_review(name):
+        state = await original(name)
+        state["review"].update(primary_key_source="DATABASE", key_validation={"valid": False})
+        return state
+    temporal.handle.query = failed_review
+    app.dependency_overrides[get_temporal_client] = lambda: temporal
+    try:
+        response = TestClient(app).post("/migrations/oracle-test/approve-primary-key", json={
+            "approved_by": "reviewer", "primary_key_columns": []})
+        assert response.status_code == 200
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_manual_primary_key_api_validates_columns_and_explicit_no_key():
+    temporal = FakeClient()
+    original = temporal.handle.query
+    async def no_key_review(name):
+        state = await original(name)
+        state["review"]["primary_key"] = []
+        state["review"]["columns"].append({"name": "TENANT", "fabric_type": "STRING"})
+        return state
+    temporal.handle.query = no_key_review
+    temporal.handle.phase = "WAITING_FOR_PRIMARY_KEY_APPROVAL"
+    app.dependency_overrides[get_temporal_client] = lambda: temporal
+    try:
+        client = TestClient(app)
+        body = {"approved_by": "reviewer", "primary_key_columns": ["ORDER_ID", "TENANT"]}
+        assert client.post("/migrations/oracle-test/approve-primary-key", json=body).status_code == 200
+        assert temporal.handle.signals[-1][1]["primary_key_columns"] == body["primary_key_columns"]
+        for keys in [["UNKNOWN"], ["ORDER_ID", "ORDER_ID"], [""]]:
+            assert client.post("/migrations/oracle-test/approve-primary-key", json={
+                **body, "primary_key_columns": keys}).status_code == 422
+        assert len(temporal.handle.signals) == 1
+        assert client.post("/migrations/oracle-test/approve-primary-key", json={
+            **body, "primary_key_columns": []}).status_code == 200
+        assert temporal.handle.signals[-1][1]["primary_key_columns"] == []
+        assert client.post("/migrations/oracle-test/approve-primary-key", json={
+            "approved_by": "reviewer"}).status_code == 422
+        temporal.handle.phase = "WAITING_FOR_WATERMARK_APPROVAL"
+        assert client.post("/migrations/oracle-test/edit-primary-key").status_code == 200
+        assert client.post("/migrations/oracle-test/approve-primary-key", json=body).status_code == 409
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_database_primary_key_cannot_be_overridden():
+    temporal = FakeClient()
+    temporal.handle.phase = "WAITING_FOR_WATERMARK_APPROVAL"
+    app.dependency_overrides[get_temporal_client] = lambda: temporal
+    try:
+        assert TestClient(app).post("/migrations/oracle-test/edit-primary-key").status_code == 409
+        assert temporal.handle.signals == []
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_sap_watermark_approval_accepts_only_discovered_columns_and_requires_key():
+    temporal = FakeClient()
+    original = temporal.handle.query
+    has_key = True
+    async def sap_review(name):
+        state = await original(name)
+        state["migration_approach"] = "SAP_TABLE"
+        state["phase"] = "WAITING_FOR_WATERMARK_APPROVAL"
+        state["review"]["primary_key"] = ["MANDT", "VBELN"] if has_key else []
+        state["review"]["watermark_candidates"] = [{"column_name": "AEDAT", "data_type": "DATS"}]
+        return state
+    temporal.handle.query = sap_review
+    app.dependency_overrides[get_temporal_client] = lambda: temporal
+    try:
+        client = TestClient(app)
+        body = {"approved_by": "reviewer", "watermark_column": "AEDAT"}
+        assert client.post("/migrations/oracle-test/approve-watermark", json=body).status_code == 200
+        assert temporal.handle.signals[-1][1]["watermark_column"] == "AEDAT"
+        assert client.post("/migrations/oracle-test/approve-watermark", json={
+            **body, "watermark_column": "ERZET"}).status_code == 422
+        has_key = False
+        assert client.post("/migrations/oracle-test/approve-watermark", json=body).status_code == 422
+        assert client.post("/migrations/oracle-test/approve-watermark", json={
+            **body, "watermark_column": None}).status_code == 200
+    finally:
+        app.dependency_overrides.clear()
+
+
 def test_oracle_mapping_and_watermark_are_separate_approvals():
     temporal = FakeClient()
     app.dependency_overrides[get_temporal_client] = lambda: temporal

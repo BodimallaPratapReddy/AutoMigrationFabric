@@ -1,0 +1,28 @@
+{
+  "SAP-READ": {
+    "url": "${env:ABAP_SAP_URL}",
+    "client": "${env:ABAP_SAP_CLIENT}",
+    "authType": "basic",
+    "user": "${env:ABAP_SAP_USER}",
+    "password": "${env:ABAP_SAP_PASSWORD}",
+    "default": true,
+    "policy": {
+      "readOnly": true,
+      "allowDataPreview": false,
+      "allowFreeSql": false,
+      "deniedTools": [
+        "runQuery",
+        "tableContents",
+        "exportPackageSources",
+        "reentranceTicket",
+        "toolset:debugger",
+        "toolset:traces",
+        "toolset:git",
+        "toolset:tests",
+        "toolset:atc",
+        "toolset:rap",
+        "toolset:refactoring"
+      ]
+    }
+  }
+}

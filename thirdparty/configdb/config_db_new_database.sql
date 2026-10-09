@@ -636,6 +636,9 @@ CREATE TABLE bronze_replication.ReplicationConfig
 
     PipelineItemId            nvarchar(100) NULL,
 
+    DeletePolicy              nvarchar(max) NULL,
+    KeyValidation             nvarchar(max) NULL,
+
     CreatedTimestamp          datetime2 NOT NULL
         CONSTRAINT DF_ReplicationConfig_Created DEFAULT SYSUTCDATETIME(),
 
@@ -651,6 +654,11 @@ CREATE TABLE bronze_replication.ReplicationConfig
 
     CONSTRAINT CK_ReplicationConfig_MaxRowFetch
         CHECK (MaxRowFetch >= 0),
+
+    CONSTRAINT CK_ReplicationConfig_DeletePolicy_JSON
+        CHECK (DeletePolicy IS NULL OR ISJSON(DeletePolicy) = 1),
+    CONSTRAINT CK_ReplicationConfig_KeyValidation_JSON
+        CHECK (KeyValidation IS NULL OR ISJSON(KeyValidation) = 1),
 
     CONSTRAINT CK_ReplicationConfig_PrimaryKeys_JSON
         CHECK (PrimaryKeyColumns IS NULL OR ISJSON(PrimaryKeyColumns) = 1),
@@ -700,6 +708,9 @@ CREATE TABLE bronze_replication.ReplicationState
     LastRunCompletedTimestamp datetime2 NULL,
 
     LastSuccessfulTimestamp   datetime2 NULL,
+
+    LastReconciledTimestamp   datetime2 NULL,
+    LastReconciledSCN         bigint NULL,
 
     RowsRead                  bigint NULL,
 
@@ -1192,6 +1203,23 @@ SELECT
 
     rc.PipelineWorkspaceId,
     rc.PipelineItemId,
+
+    rc.DeletePolicy,
+    rc.KeyValidation,
+    COALESCE(JSON_VALUE(rc.DeletePolicy, '$.mode'), 'NONE') AS DeleteDetectionMethod,
+    JSON_VALUE(rc.DeletePolicy, '$.behavior') AS DeleteAction,
+    JSON_VALUE(rc.DeletePolicy, '$.soft_delete_column') AS SoftDeleteColumn,
+    JSON_VALUE(rc.DeletePolicy, '$.soft_delete_predicate') AS SoftDeletePredicate,
+    JSON_QUERY(rc.DeletePolicy, '$.soft_delete_values') AS SoftDeleteValues,
+    CASE JSON_VALUE(rc.DeletePolicy, '$.watermark_tracks_soft_delete')
+        WHEN 'true' THEN CAST(1 AS bit) WHEN 'false' THEN CAST(0 AS bit) END AS SoftDeleteWatermarkConfirmed,
+    TRY_CONVERT(int, JSON_VALUE(rc.DeletePolicy, '$.reconcile_interval_minutes')) AS ReconcileIntervalMinutes,
+    CASE JSON_VALUE(rc.DeletePolicy, '$.reconcile_require_complete_snapshot')
+        WHEN 'true' THEN CAST(1 AS bit) WHEN 'false' THEN CAST(0 AS bit) END AS ReconcileRequireCompleteSnapshot,
+    CASE JSON_VALUE(rc.DeletePolicy, '$.reconcile_require_consistent_snapshot')
+        WHEN 'true' THEN CAST(1 AS bit) WHEN 'false' THEN CAST(0 AS bit) END AS ReconcileRequireConsistentSnapshot,
+    rs.LastReconciledTimestamp,
+    rs.LastReconciledSCN,
 
     rs.LastWatermarkValue,
     rs.LastSuccessfulBatchRunId,

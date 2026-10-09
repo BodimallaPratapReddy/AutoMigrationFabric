@@ -1,0 +1,168 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "servers": {
+      "sap": {
+        "type": "remote",
+        "url": "http://127.0.0.1:3001/mcp",
+        "oauth": false,
+        "codemode": false,
+        "headers": {
+          "Authorization": "Bearer {env:ABAP_MCP_TOKEN}"
+        },
+        "timeout": {
+          "startup": 30000,
+          "catalog": 30000,
+          "execution": 120000
+        }
+      }
+    }
+  },
+  "permissions": [
+    {
+      "action": "sap_*",
+      "resource": "*",
+      "effect": "deny"
+    },
+    {
+      "action": "sap_healthcheck",
+      "resource": "*",
+      "effect": "allow"
+    },
+    {
+      "action": "sap_listSystems",
+      "resource": "*",
+      "effect": "allow"
+    },
+    {
+      "action": "sap_systemProfile",
+      "resource": "*",
+      "effect": "allow"
+    },
+    {
+      "action": "sap_login",
+      "resource": "*",
+      "effect": "allow"
+    },
+    {
+      "action": "sap_logout",
+      "resource": "*",
+      "effect": "allow"
+    },
+    {
+      "action": "sap_dropSession",
+      "resource": "*",
+      "effect": "allow"
+    },
+    {
+      "action": "sap_searchObject",
+      "resource": "*",
+      "effect": "allow"
+    },
+    {
+      "action": "sap_findObjectPath",
+      "resource": "*",
+      "effect": "allow"
+    },
+    {
+      "action": "sap_objectTypes",
+      "resource": "*",
+      "effect": "allow"
+    },
+    {
+      "action": "sap_getObjectSource",
+      "resource": "*",
+      "effect": "allow"
+    },
+    {
+      "action": "sap_getMethodSource",
+      "resource": "*",
+      "effect": "allow"
+    },
+    {
+      "action": "sap_classIncludes",
+      "resource": "*",
+      "effect": "allow"
+    },
+    {
+      "action": "sap_classComponents",
+      "resource": "*",
+      "effect": "allow"
+    },
+    {
+      "action": "sap_objectStructure",
+      "resource": "*",
+      "effect": "allow"
+    },
+    {
+      "action": "sap_objectStructureElements",
+      "resource": "*",
+      "effect": "allow"
+    },
+    {
+      "action": "sap_objectRegistrationInfo",
+      "resource": "*",
+      "effect": "allow"
+    },
+    {
+      "action": "sap_mainPrograms",
+      "resource": "*",
+      "effect": "allow"
+    },
+    {
+      "action": "sap_nodeContents",
+      "resource": "*",
+      "effect": "allow"
+    },
+    {
+      "action": "sap_typeHierarchy",
+      "resource": "*",
+      "effect": "allow"
+    },
+    {
+      "action": "sap_objectEnhancements",
+      "resource": "*",
+      "effect": "allow"
+    },
+    {
+      "action": "sap_whereUsed",
+      "resource": "*",
+      "effect": "allow"
+    },
+    {
+      "action": "sap_cdsViewInfo",
+      "resource": "*",
+      "effect": "allow"
+    },
+    {
+      "action": "sap_sourceTextSearch",
+      "resource": "*",
+      "effect": "allow"
+    },
+    {
+      "action": "sap_ddicElement",
+      "resource": "*",
+      "effect": "allow"
+    },
+    {
+      "action": "sap_ddicRepositoryAccess",
+      "resource": "*",
+      "effect": "allow"
+    },
+    {
+      "action": "sap_getDomainProperties",
+      "resource": "*",
+      "effect": "allow"
+    },
+    {
+      "action": "sap_getDataElementProperties",
+      "resource": "*",
+      "effect": "allow"
+    },
+    {
+      "action": "sap_annotationDefinitions",
+      "resource": "*",
+      "effect": "allow"
+    }
+  ]
+}

@@ -1,0 +1,16 @@
+Validated locally:
+- Docker Compose configuration: PASS (docker compose config --quiet).
+- OpenCode and destination JSON parsing: PASS.
+- Python patch syntax: PASS.
+- Bash entrypoint syntax: PASS.
+- Bundled skill frontmatter: sap-datasource-reverse-engineering-adt.
+- SQL-preview patch: same implementation previously validated on WSL with
+  45 metadata SELECTs, table preview, BAdI registry query and repository read.
+
+Container build / startup: NOT VALIDATED.
+Docker Desktop reports running but its desktop-linux engine pipe is absent.
+Build failed before pulling images or executing Dockerfile steps.
+Start/recover Docker Desktop's Linux engine, then run docker compose build.
+
+No SAP credentials or provider authentication copied into the image.
+No SAP changes, business transaction reads or SQL deployment performed.

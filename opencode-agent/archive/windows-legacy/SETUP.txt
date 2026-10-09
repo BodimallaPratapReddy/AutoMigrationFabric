@@ -1,0 +1,33 @@
+Read-only SAP MCP for OpenCode V2
+
+Prepared configuration only; no server was started or SAP contacted.
+Existing skills, provider settings and Docker deployment were not modified.
+Installed Windows OpenCode checked: 1.18.34. These files require V2.
+Use the Windows standalone CLI from https://opencode.ai/v2/docs/ (Windows package managers are not supported per that page). Keep V1 available while validating V2 separately.
+
+1. Choose the SAP destination and an SAP account restricted to display/read authorizations.
+2. Copy systems.example.json to systems.json and .env.example to .env. Populate .env locally. Do not paste secrets into agent chat. Set ABAP_MCP_IMAGE to the verified pinned version/digest of ghcr.io/williansaez/abap-adt-mcp. This prepared bundle does not assume an unverified image tag exists.
+3. SAP must expose /sap/bc/adt and the account must have the required ADT/display authorizations. systems.json uses the SAP host base URL, NOT the custom /z_mcp_abap_adt service prefix.
+4. The default verifies SAP TLS. For the previously authorized demo only, add insecureTls: true to that destination if needed. No PEM is required for this explicit demo option. Do not use NODE_TLS_REJECT_UNAUTHORIZED=0; the server ignores it.
+5. In this directory run: docker compose up -d
+6. Merge opencode.v2.fragment.json into the chosen V2 project configuration. Preserve existing provider/model settings. Do not feed this fragment to V1. V2 uses mcp.servers and permissions, not the V1 shape. Later matching permissions take precedence: retain the broad sap_* deny before the specific read-tool allow rules, and avoid later agent rules reopening them.
+7. Set ABAP_MCP_TOKEN in the environment of the Windows process launching OpenCode to the same value used by Docker. Docker Compose's .env does NOT automatically populate the Windows OpenCode environment. Never print the token. Run V2 opencode mcp list, then test healthcheck/listSystems and an explicit destination SAP-READ repository read.
+8. From Windows use http://127.0.0.1:3001/mcp. If OpenCode itself is in a Docker container on Docker Desktop, use http://host.docker.internal:3001/mcp instead, and test reachability: loopback publication can depend on Docker Desktop networking. A shared Compose network with URL http://abap-mcp-readonly:3000/mcp is another option. Do not publish the service broadly merely to solve connectivity.
+
+Read-only controls
+- Server MCP_READ_ONLY=1 enforces read-only on every destination, even if a file later omits that setting.
+- Per-destination policy.readOnly=true independently documents the restriction.
+- Reduced source/objects/data toolsets exclude tests, debugger, execution and development workflows. These selected groups still publish some write-tool schemas; publication does not grant execution.
+- OpenCode denies sap_* by default and allows only the reviewed repository/metadata reads. codemode=false keeps them as direct tools for permission matching.
+- reentranceTicket, bulk package export, tableContents and runQuery are explicitly denied server-side. Local output specification writing by OpenCode remains possible; SAP read-only does not mean no local files.
+- Configured policy controls are documented by the server; runtime enforcement and SAP authorizations have not yet been tested here. Do not test a write against SAP merely to prove denial.
+
+Configuration evidence
+This initial source-and-metadata profile does not read table rows. DataSource metadata and active configuration snapshots can be supplied as files. To retrieve configuration rows later, add an explicit reviewed profile for tableContents (allowDataPreview, deniedTables and OpenCode permission must be adjusted together); retain readOnly and keep free SQL disabled. Metadata alone cannot prove that a BTE is inactive.
+
+References
+https://opencode.ai/v2/docs/mcp-servers/
+https://opencode.ai/v2/docs/permissions/
+https://opencode.ai/v2/docs/
+https://github.com/williansaez/abap-adt-mcp
+https://github.com/williansaez/abap-adt-mcp/blob/main/docs/CONFIGURATION.md

@@ -17,6 +17,7 @@ from uuid import UUID, uuid4, uuid5
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, model_validator
 
 from .utils import ConfigDB
+from thirdparty.delete_policy import validate_delete_policy
 
 if TYPE_CHECKING:
     from mssql_python.connection import Connection
@@ -210,6 +211,8 @@ class ReplicationConfigCreate(DBRow):
     ingestion_flag: bool = Field(default=True, alias="IngestionFlag")
     pipeline_workspace_id: str | None = Field(default=None, alias="PipelineWorkspaceId")
     pipeline_item_id: str | None = Field(default=None, alias="PipelineItemId")
+    delete_policy: dict[str, JsonValue] | None = Field(default=None, alias="DeletePolicy")
+    key_validation: dict[str, JsonValue] | None = Field(default=None, alias="KeyValidation")
 
     @model_validator(mode="after")
     def check_strategy(self) -> "ReplicationConfigCreate":
@@ -219,6 +222,11 @@ class ReplicationConfigCreate(DBRow):
             raise ValueError("watermark index requires a watermark column")
         if self.write_strategy in {"UPSERT", "SCD1", "SCD2"} and not (self.merge_key_columns or self.primary_key_columns):
             raise ValueError("merge strategy requires key columns")
+        if self.delete_policy and self.delete_policy.get("mode") != "NONE":
+            if not self.primary_key_columns or (self.key_validation or {}).get("valid") is not True:
+                raise ValueError("Delete propagation requires validated primary key columns")
+            if self.key_validation.get("columns") != self.primary_key_columns:
+                raise ValueError("Key validation must match selected primary key columns")
         return self
 
 
@@ -239,6 +247,8 @@ class ReplicationStateRecord(DBRow):
     rows_written: int | None = Field(alias="RowsWritten")
     status: str = Field(alias="Status")
     error_message: str | None = Field(alias="ErrorMessage")
+    last_reconciled_timestamp: datetime | None = Field(default=None, alias="LastReconciledTimestamp")
+    last_reconciled_scn: int | None = Field(default=None, alias="LastReconciledSCN")
 
 
 class SourceTablePlan(DBRow):
@@ -252,6 +262,10 @@ class SourceTablePlan(DBRow):
         names = [column.column_name.upper() for column in self.columns]
         if len(set(positions)) != len(positions) or len(set(names)) != len(names):
             raise ValueError("table column positions and names must be unique")
+        if self.replication.delete_policy is not None:
+            self.replication.delete_policy = validate_delete_policy(
+                self.replication.delete_policy, [column.column_name for column in self.columns],
+                self.replication.primary_key_columns or [], self.replication.watermark_column)
         return self
 
 
@@ -423,6 +437,12 @@ def _sql_value(value: object) -> object:
 
 def _runtime_fingerprint(plan: ApprovedRuntimePlan) -> str:
     payload = plan.model_dump(mode="json")
+    # Adding nullable policy fields must not change fingerprints for older plans
+    # replaying a persistence activity that already committed.
+    for table in payload["tables"]:
+        for name in ("delete_policy", "key_validation"):
+            if table["replication"].get(name) is None:
+                table["replication"].pop(name, None)
     # Plan-local references are excluded from SQL serialization, but must be
     # included in the idempotency hash.
     payload["dependency_indices"] = [
@@ -480,12 +500,27 @@ class ConfigDBRepository(ConfigDB):
         cursor.execute(sql, tuple(_sql_value(values[name]) for name in columns))
 
     @staticmethod
+    def _insert_many(cursor: object, table: str, rows: list[dict[str, object]]) -> None:
+        """Batch bound inserts while retaining omitted-column defaults and SQL limits."""
+        grouped: dict[tuple[str, ...], list[dict[str, object]]] = {}
+        for values in rows:
+            grouped.setdefault(tuple(values), []).append(values)
+        for columns, values in grouped.items():
+            batch_size = min(1000, 2000 // len(columns))
+            placeholders = "(" + ", ".join("?" for _ in columns) + ")"
+            for offset in range(0, len(values), batch_size):
+                batch = values[offset:offset + batch_size]
+                sql = (f"INSERT INTO bronze_replication.{table} (" + ", ".join(columns)
+                       + ") VALUES " + ", ".join(placeholders for _ in batch))
+                cursor.execute(sql, tuple(_sql_value(row[name]) for row in batch for name in columns))
+
+    @staticmethod
     def _rows(cursor: object, model: type[DBRow]) -> list[DBRow]:
         names = [column[0] for column in cursor.description]
         records = []
         for row in cursor.fetchall():
             values = dict(zip(names, row, strict=True))
-            for key in ("ConnectionDetails", "ConnectionTags", "PrimaryKeyColumns", "MergeKeyColumns"):
+            for key in ("ConnectionDetails", "ConnectionTags", "PrimaryKeyColumns", "MergeKeyColumns", "DeletePolicy", "KeyValidation"):
                 if key in values and values[key] is not None:
                     values[key] = json.loads(values[key])
             records.append(model.model_validate(values))
@@ -956,7 +991,7 @@ class ConfigDBRepository(ConfigDB):
                     "WatermarkColumn, WatermarkColumnDataType, WatermarkIndexName, "
                     "WriteStrategy, PrimaryKeyColumns, "
                     "MergeKeyColumns, EffectiveFromColumn, EffectiveToColumn, CurrentFlagColumn, "
-                    "MaxRowFetch, IngestionFlag, PipelineWorkspaceId, PipelineItemId "
+                    "MaxRowFetch, IngestionFlag, PipelineWorkspaceId, PipelineItemId, DeletePolicy, KeyValidation "
                     "FROM bronze_replication.ReplicationConfig WHERE SourceTableGUID = ?",
                     (str(source_table_guid),))
                 rows = self._rows(cursor, ReplicationConfigRecord)
@@ -996,7 +1031,8 @@ class ConfigDBRepository(ConfigDB):
                 cursor.execute(
                     "SELECT SourceTableGUID, LastWatermarkValue, LastSuccessfulBatchRunId, "
                     "LastPipelineRunId, LastRunStartedTimestamp, LastRunCompletedTimestamp, "
-                    "LastSuccessfulTimestamp, RowsRead, RowsWritten, Status, ErrorMessage "
+                    "LastSuccessfulTimestamp, RowsRead, RowsWritten, Status, ErrorMessage, "
+                    "LastReconciledTimestamp, LastReconciledSCN "
                     "FROM bronze_replication.ReplicationState WHERE SourceTableGUID = ?",
                     (str(source_table_guid),))
                 rows = self._rows(cursor, ReplicationStateRecord)
@@ -1302,7 +1338,8 @@ class ConfigDBRepository(ConfigDB):
                 if row[0] != "APPROVED" or row[4] is not None:
                     raise ValueError("plan is not awaiting runtime persistence")
                 for source in plan.tables:
-                    if source.table.source_system_type != "ORACLE":
+                    if source.table.source_system_type != "ORACLE" and not (
+                        source.table.source_system_type == "SAP_ECC" and source.table.source_object_type == "TABLE"):
                         continue
                     cursor.execute(
                         "SELECT GUID FROM bronze_replication.SourceTables WITH (UPDLOCK, HOLDLOCK) "
@@ -1322,12 +1359,11 @@ class ConfigDBRepository(ConfigDB):
                         "GUID": table_id, "PlanGUID": plan.plan_guid,
                         **table_values,
                     })
-                    for column_index, column in enumerate(source.columns):
-                        self._insert(cursor, "SourceTableColumns", {
+                    self._insert_many(cursor, "SourceTableColumns", [{
                             "SourceTableColumnGUID": uuid5(table_id, f"column:{column_index}"),
                             "GUID": table_id,
                             **column.model_dump(by_alias=True, exclude_none=True),
-                        })
+                        } for column_index, column in enumerate(source.columns)])
                     self._insert(cursor, "ReplicationConfig", {
                         "ReplicationConfigGUID": uuid5(table_id, "replication-config"),
                         "SourceTableGUID": table_id,

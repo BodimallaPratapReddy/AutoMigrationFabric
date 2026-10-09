@@ -6,7 +6,7 @@ connections, each approved action, and the exact result expected by the API.
 The implementation is saved as
 [`nb_migration_provisioning.py`](nb_migration_provisioning.py) and
 [`nb_migration_provisioning.ipynb`](nb_migration_provisioning.ipynb). The user
-reported Fabric notebook item ID `5b8a6415-f6b9-4890-8bc5-226528914c59`.
+reported Fabric notebook item ID `ad26f3ef-ae33-41d0-af9c-100075accc29`.
 The repository copy fixes the exported notebook's hardcoded parameter GUID,
 approval comparison, and ingestion flag handling. Upload this copy over the
 Fabric item before an app-driven run; the local edit does not change the

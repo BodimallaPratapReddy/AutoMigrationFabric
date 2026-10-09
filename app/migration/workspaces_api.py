@@ -11,6 +11,7 @@ from thirdparty.fabric.client import FabricClient
 
 
 router = APIRouter(prefix="/workspaces", tags=["workspaces"])
+LAKEHOUSE_REQUEST_TIMEOUT = 25.0
 
 
 class WorkspaceOption(BaseModel):
@@ -36,6 +37,14 @@ async def list_workspaces() -> list[WorkspaceOption]:
 
 @router.get("/{workspace_id}/lakehouses", response_model=list[LakehouseOption])
 async def list_lakehouses(workspace_id: UUID) -> list[LakehouseOption]:
+    try:
+        return await asyncio.wait_for(
+            _list_lakehouses(workspace_id), timeout=LAKEHOUSE_REQUEST_TIMEOUT)
+    except TimeoutError as exc:
+        raise HTTPException(504, "Loading Lakehouses timed out. Check connectivity to Microsoft Entra and Fabric, then retry.") from exc
+
+
+async def _list_lakehouses(workspace_id: UUID) -> list[LakehouseOption]:
     identifier = str(workspace_id)
     try:
         rows = await asyncio.to_thread(

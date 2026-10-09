@@ -1,0 +1,16 @@
+{
+  "readOnly": true,
+  "allowDataPreview": true,
+  "allowFreeSql": true,
+  "deniedTools": [
+    "exportPackageSources",
+    "reentranceTicket",
+    "toolset:debugger",
+    "toolset:traces",
+    "toolset:git",
+    "toolset:tests",
+    "toolset:atc",
+    "toolset:rap",
+    "toolset:refactoring"
+  ]
+}

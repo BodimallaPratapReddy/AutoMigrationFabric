@@ -38,6 +38,7 @@
     .mapping-grid input { min-width: 155px; }
     .mapping-grid .muted { font-size: .82rem; }
     #unsupported-ack-wrap input { width: auto; margin-right: 8px; }
+    #primary-key-wrap input { width: auto; margin-right: 8px; }
     .muted { color: #607685; }
     @media (max-width: 780px) { main { grid-template-columns: 1fr; } .wide { grid-column: 1; } }
   </style>
@@ -68,9 +69,10 @@
           <option value="">Select a workspace first</option>
         </select>
         <p id="lakehouse-list-message" class="muted"></p>
+        <button id="lakehouse-retry" type="button" class="hidden">Retry Lakehouses</button>
         <label for="fabric-schema">Fabric schema</label><input id="fabric-schema" name="fabric_schema_name" required>
         <label for="target">Target name (optional)</label><input id="target" name="fabric_target_name">
-        <label for="notebook">Provisioning notebook ID (optional)</label><input id="notebook" name="provisioning_notebook_id" value="5b8a6415-f6b9-4890-8bc5-226528914c59" placeholder="UUID, or leave blank">
+        <label for="notebook">Provisioning notebook ID (optional)</label><input id="notebook" name="provisioning_notebook_id" value="ad26f3ef-ae33-41d0-af9c-100075accc29" placeholder="UUID, or leave blank">
         <p class="muted">Without a notebook ID, the workflow saves the approved plan and stops before provisioning. Data loading runs later in the separately scheduled replication pipeline.</p>
         <label for="requester">Requested by (optional)</label><input id="requester" name="requested_by">
         <div class="actions"><button type="submit">Start migration</button></div>
@@ -113,8 +115,18 @@
     <section id="review-section" class="wide hidden">
       <h2 id="review-title">Review</h2>
       <pre id="review"></pre>
+      <div id="runtime-grid-wrap" class="hidden">
+        <p id="runtime-plan-summary" class="muted"></p>
+        <div class="grid-scroll">
+          <table class="mapping-grid">
+            <thead><tr><th>Column name</th><th>Source datatype</th><th>Target datatype</th><th>Mapping reason</th></tr></thead>
+            <tbody id="runtime-grid-body"></tbody>
+          </table>
+        </div>
+        <details><summary>View full plan details</summary><pre id="runtime-plan-details"></pre></details>
+      </div>
       <div id="column-grid-wrap" class="grid-scroll hidden">
-        <p class="muted">Review each Oracle column and edit its Fabric type where needed. Confirm these mappings to continue to watermark selection.</p>
+        <p class="muted">Review each Oracle column and edit its Fabric type where needed. Confirm these mappings to continue to replication setup.</p>
         <table class="mapping-grid">
           <thead><tr><th>Source column</th><th>Oracle type</th><th>Fabric type</th><th>Mapping note</th></tr></thead>
           <tbody id="column-grid-body"></tbody>
@@ -129,10 +141,49 @@
           <option value="FLOAT"><option value="DOUBLE"><option value="DECIMAL(18,0)">
         </datalist>
       </div>
+      <div id="primary-key-wrap" class="hidden">
+        <p>No primary key was reported by the source database. Specify the fields that identify each row, or choose no primary key.</p>
+        <p id="primary-key-validation-help" class="muted">Selected fields must be unique together, contain no null values, and remain stable.</p>
+        <label><input type="radio" name="primary-key-choice" value="fields"> Specify primary key fields</label>
+        <label><input type="radio" name="primary-key-choice" value="none"> No primary key — full load only</label>
+        <div id="primary-key-candidates"></div>
+        <div id="primary-key-fields" class="hidden"></div>
+      </div>
       <div id="watermark-wrap" class="hidden">
-        <label for="watermark">Oracle replication method</label>
+        <label for="watermark">Replication method</label>
         <select id="watermark"></select>
         <p id="watermark-description" class="muted"></p>
+      </div>
+      <div id="delete-policy-wrap" class="hidden">
+        <p id="delete-policy-description" class="muted"></p>
+        <label for="delete-mode">How should source deletes be detected?</label>
+        <select id="delete-mode">
+          <option value="">Choose delete handling</option>
+          <option value="NONE">Do not propagate deletes through incremental loads</option>
+          <option value="SOFT_DELETE">Source soft-delete field</option>
+          <option value="RECONCILE">Scheduled source key reconciliation</option>
+          <option value="SOFT_DELETE_AND_RECONCILE">Soft-delete field and scheduled key reconciliation</option>
+        </select>
+        <div id="delete-action-wrap" class="hidden">
+          <label for="delete-action">What should Bronze do with deleted rows?</label>
+          <select id="delete-action"><option value="MARK">Keep the row and mark it deleted</option>
+            <option value="DELETE">Remove the row from the current-state table</option></select>
+        </div>
+        <div id="soft-delete-wrap" class="hidden">
+          <label for="soft-delete-column">Source deletion field</label><select id="soft-delete-column"></select>
+          <label for="soft-delete-predicate">When is a row deleted?</label>
+          <select id="soft-delete-predicate"><option value="VALUES">Field equals a deletion value</option>
+            <option value="NOT_NULL">Field is not null (for example, a deletion timestamp)</option></select>
+          <label for="soft-delete-values">Exact deletion values, one per line</label>
+          <textarea id="soft-delete-values" placeholder="Y"></textarea>
+          <label id="soft-delete-watermark-wrap"><input type="checkbox" id="soft-delete-watermark-confirmed">
+            Deletion and restoration changes both advance the selected watermark</label>
+        </div>
+        <div id="reconcile-wrap" class="hidden">
+          <label for="reconcile-interval">Reconcile source keys every (minutes)</label>
+          <input type="number" id="reconcile-interval" value="1440" min="15" max="525600">
+          <p class="muted">Your Fabric pipeline must compare a complete consistent source key snapshot with Bronze. Failed or partial snapshots must never cause deletions. The interval is enforced by the pipeline's schedule.</p>
+        </div>
       </div>
       <div id="target-change-wrap" class="hidden">
         <p id="target-change-summary"></p>
@@ -147,6 +198,7 @@
       <div class="actions">
         <button id="approve" type="button">Approve</button>
         <button id="edit-columns" type="button" class="secondary hidden">Edit column mappings</button>
+        <button id="edit-primary-key" type="button" class="secondary hidden">Specify primary key fields</button>
         <button id="feedback-send" type="button" class="secondary hidden">Submit feedback</button>
         <button id="reject" type="button" class="danger">Reject</button>
       </div>
@@ -169,6 +221,7 @@
     let workspaces = [];
     let lakehouses = [];
     let lakehouseRequestVersion = 0;
+    let lakehouseRequestController = null;
     const routes = {ORACLE_TABLE:'oracle-table', SAP_TABLE:'sap-table', SAP_ODP:'sap-odp', SAP_REBUILD:'sap-rebuild'};
     let approachesBySource = {};
     const display = value => value == null ? '—' : String(value);
@@ -177,6 +230,62 @@
     function setReviewMessage(message) {
       $('review-message').textContent = message || '';
       setMessage(message);
+    }
+    function mappingReason(column) {
+      if (column.reason) return column.reason;
+      if (column.warning) return column.warning;
+      const source = (column.source_type || '').split('(')[0].trim().toUpperCase();
+      const target = (column.fabric_type || '').trim().toUpperCase();
+      const textTarget = /^(STRING|VARCHAR|CHAR|NVARCHAR)/.test(target);
+      if (source === 'CLNT' && textTarget)
+        return 'Stores the three-character SAP client identifier as text, preserving leading zeros such as 001.';
+      if (textTarget && ['CHAR', 'VARCHAR', 'VARCHAR2', 'NVARCHAR2', 'NCHAR', 'STRING', 'LANG', 'CUKY'].includes(source))
+        return target === 'STRING' ? 'Stores the source text as a Lakehouse string.' :
+          'Uses the configured target text type and preserves the declared field length when specified.';
+      if (textTarget && source === 'NUMC')
+        return 'Keeps numeric character values as text so leading zeros are preserved.';
+      if (source === 'DATS' && textTarget)
+        return 'Keeps the SAP date as its eight-character YYYYMMDD representation.';
+      if (source === 'TIMS' && textTarget)
+        return 'Preserves the six-character SAP HHMMSS value, including leading zeros; time conversion belongs in a later layer.';
+      if (source === 'TIMS' && target === 'TIME')
+        return 'Maps the SAP time-of-day field to the configured TIME type.';
+      if (['DEC', 'CURR', 'QUAN', 'NUMBER'].includes(source) && target.startsWith('DECIMAL('))
+        return 'Uses a decimal type with the displayed precision and scale to retain exact numeric values.';
+      if (['INT1', 'INT2', 'INT4', 'INT8'].includes(source) && ['SMALLINT', 'INT', 'BIGINT'].includes(target))
+        return 'Uses the configured integer type for the source numeric range.';
+      if (['RAW', 'RAWSTRING', 'BLOB', 'LONG RAW'].includes(source) && /^(BINARY|VARBINARY)/.test(target))
+        return 'Keeps the source bytes in a binary target type.';
+      if (source === 'DATE' && target === 'TIMESTAMP')
+        return 'Oracle DATE contains both date and time, so TIMESTAMP retains both components.';
+      if (source.startsWith('TIMESTAMP') && target === 'TIMESTAMP')
+        return 'Maps the source timestamp to the Lakehouse timestamp type.';
+      if (source === target) return 'The source and target use the same datatype.';
+      return 'Uses the configured source-to-target datatype mapping; no additional explanation was supplied.';
+    }
+    function renderRuntimeGrid() {
+      const review = current.review;
+      $('runtime-plan-summary').textContent = [review.source,
+        review.load_method ? `Load method: ${review.load_method}` : '',
+        review.write_strategy ? `Write strategy: ${review.write_strategy}` : '',
+        `Primary key: ${(review.primary_key || []).join(', ') || 'None discovered'}`
+      ].filter(Boolean).join(' · ');
+      const body = $('runtime-grid-body');
+      body.replaceChildren();
+      for (const column of review.columns) {
+        const row = document.createElement('tr');
+        for (const value of [column.name, column.source_type, column.fabric_type]) {
+          const cell = document.createElement('td'); cell.textContent = display(value); row.append(cell);
+        }
+        const note = document.createElement('td'); note.textContent = mappingReason(column);
+        if (column.reason && column.warning && column.reason !== column.warning) {
+          const warning = document.createElement('p'); warning.textContent = column.warning;
+          warning.className = 'muted'; note.append(warning);
+        }
+        if (column.warning || column.supported === false || column.lossy) row.style.backgroundColor = '#fff3df';
+        row.append(note); body.append(row);
+      }
+      $('runtime-plan-details').textContent = JSON.stringify(review, null, 2);
     }
     function renderColumnGrid() {
       const body = $('column-grid-body');
@@ -196,7 +305,7 @@
         typeCell.append(input);
         const note = document.createElement('td');
         note.className = 'muted'; note.textContent =
-          `${column.supported === false ? 'Requires review. ' : ''}${column.warning || ''}`;
+          `${column.supported === false ? 'Requires review. ' : ''}${mappingReason(column)}`;
         if (column.supported === false || column.lossy) row.style.backgroundColor = '#fff3df';
         row.append(name, source, typeCell, note);
         body.append(row);
@@ -209,7 +318,7 @@
     function showWatermarkChoice() {
       const choice = $('watermark').value;
       const candidate = (current?.review?.watermark_candidates || []).find(item => item.column_name === choice);
-      const preferred = candidate ? [...candidate.index_details].sort((a, b) =>
+      const preferred = candidate ? [...(candidate.index_details || [])].sort((a, b) =>
         (a.column_position !== 1) - (b.column_position !== 1) ||
         a.index_name.localeCompare(b.index_name)) : [];
       if (current?.review) {
@@ -221,16 +330,97 @@
         $('review').textContent = JSON.stringify(preview, null, 2);
       }
       if (candidate) {
-        const indexes = candidate.index_details.map(item => item.index_name);
+        const indexes = (candidate.index_details || []).map(item => item.index_name);
         $('watermark-description').textContent = `${watermarkType(candidate)}; ${candidate.reason}. ` +
-          (indexes.length ? `Source index: ${indexes.join(', ')}. ` : 'No source index found. ') +
-          'The selected column and one index name will be saved with the replication plan.';
+          (indexes.length ? `Source index: ${indexes.join(', ')}. ` :
+            current.migration_approach === 'SAP_TABLE' ? 'SAP index metadata is unverified. ' : 'No source index found. ') +
+          'The selected source column and datatype will be saved for watermark upserts. ' +
+          (current.migration_approach === 'SAP_TABLE' ?
+            'Choose a field updated on changes; creation dates miss later updates. The ingestion pipeline must handle equal watermark values and SAP initial dates.' : '');
       } else {
         $('watermark-description').textContent = choice === '__FULL__' ?
-          'Full load with no watermark.' : 'Choose a column for watermark upserts, or choose full load.';
+          (current?.review?.primary_key_source === 'NONE' ?
+            'Full load only: you confirmed that this table has no primary key.' : 'Full load with no watermark.') :
+          'Choose a column for watermark upserts, or choose full load.';
       }
     }
     $('watermark').addEventListener('change', showWatermarkChoice);
+    function showPrimaryKeyChoice() {
+      const choice = document.querySelector('input[name="primary-key-choice"]:checked')?.value;
+      $('primary-key-fields').classList.toggle('hidden', choice !== 'fields');
+    }
+    for (const input of document.querySelectorAll('input[name="primary-key-choice"]'))
+      input.addEventListener('change', showPrimaryKeyChoice);
+    function renderPrimaryKeyFields() {
+      const key = current.workflow_id + ':' + JSON.stringify(current.review.primary_key || []) +
+        ':' + (current.review.primary_key_source || '') +
+        ':' + JSON.stringify(current.review.primary_key_candidates || []);
+      if ($('primary-key-fields').dataset.reviewKey === key) return;
+      $('primary-key-fields').replaceChildren();
+      for (const column of current.review.columns || []) {
+        const label = document.createElement('label');
+        const input = document.createElement('input');
+        input.type = 'checkbox'; input.dataset.primaryKeyColumn = column.name;
+        input.checked = (current.review.primary_key || []).includes(column.name);
+        label.append(input, document.createTextNode(column.name));
+        $('primary-key-fields').append(label);
+      }
+      for (const input of document.querySelectorAll('input[name="primary-key-choice"]'))
+        input.checked = input.value === (current.review.primary_key_source === 'NONE' ? 'none' :
+          (current.review.primary_key || []).length ? 'fields' : '');
+      $('primary-key-fields').dataset.reviewKey = key;
+      $('primary-key-candidates').replaceChildren();
+      for (const candidate of current.review.primary_key_candidates || []) {
+        const row = document.createElement('div');
+        const button = document.createElement('button');
+        button.type = 'button'; button.className = 'secondary';
+        button.textContent = `Use ${candidate.columns.join(' + ')} (${candidate.index_name})`;
+        button.addEventListener('click', () => {
+          for (const input of document.querySelectorAll('input[name="primary-key-choice"]'))
+            input.checked = input.value === 'fields';
+          for (const input of $('primary-key-fields').querySelectorAll('input[data-primary-key-column]'))
+            input.checked = candidate.columns.includes(input.dataset.primaryKeyColumn);
+          showPrimaryKeyChoice();
+        });
+        const note = document.createElement('p'); note.className = 'muted';
+        note.textContent = [candidate.reason, ...(candidate.warnings || [])].join('. ');
+        row.append(button, note);
+        $('primary-key-candidates').append(row);
+      }
+      showPrimaryKeyChoice();
+    }
+    function showDeletePolicyChoice() {
+      const mode = $('delete-mode').value;
+      const soft = ['SOFT_DELETE', 'SOFT_DELETE_AND_RECONCILE'].includes(mode);
+      $('delete-action-wrap').classList.toggle('hidden', !mode || mode === 'NONE');
+      $('soft-delete-wrap').classList.toggle('hidden', !soft);
+      $('reconcile-wrap').classList.toggle('hidden', !['RECONCILE', 'SOFT_DELETE_AND_RECONCILE'].includes(mode));
+      $('soft-delete-values').disabled = $('soft-delete-predicate').value === 'NOT_NULL';
+      $('soft-delete-watermark-wrap').classList.toggle('hidden', !current?.review?.selected_watermark);
+    }
+    function renderDeletePolicy() {
+      if ($('delete-policy-wrap').dataset.workflowId !== current.workflow_id) {
+        $('soft-delete-column').replaceChildren(new Option('Choose a source field', ''),
+          ...(current.review.columns || []).map(column => new Option(column.name, column.name)));
+        $('delete-mode').value = '';
+        $('delete-action').value = 'MARK';
+        $('soft-delete-predicate').value = 'VALUES';
+        $('soft-delete-values').value = '';
+        $('soft-delete-watermark-confirmed').checked = false;
+        $('reconcile-interval').value = '1440';
+        $('delete-policy-wrap').dataset.workflowId = current.workflow_id;
+      }
+      const keyed = (current.review.primary_key || []).length && current.review.key_validation?.valid === true;
+      for (const option of $('delete-mode').options)
+        option.disabled = option.value !== '' && option.value !== 'NONE' && !keyed;
+      $('delete-policy-description').textContent =
+        (current.review.load_method === 'FULL' ? 'A complete full refresh already removes rows absent from the source. ' : '') +
+        (keyed ? 'Choose the deletion policy your Fabric pipelines should apply.' :
+          'Individual delete propagation requires a validated key. Choose no incremental delete propagation.');
+      showDeletePolicyChoice();
+    }
+    $('delete-mode').addEventListener('change', showDeletePolicyChoice);
+    $('soft-delete-predicate').addEventListener('change', showDeletePolicyChoice);
     const selectedSourceType = () => connections.find(item =>
       item.connection_name === $('connection').value && item.is_active)?.source_type || null;
     function renderApproaches(preserve = false) {
@@ -292,15 +482,23 @@
     async function loadLakehouses() {
       const workspaceId = $('workspace').value;
       const requestVersion = ++lakehouseRequestVersion;
+      if (lakehouseRequestController) lakehouseRequestController.abort();
+      lakehouseRequestController = null;
       const select = $('lakehouse');
+      $('lakehouse-retry').classList.add('hidden');
+      $('lakehouse-retry').disabled = true;
       lakehouses = [];
       select.disabled = true;
       select.replaceChildren(new Option(
         workspaceId ? 'Loading Lakehouses…' : 'Select a workspace first', ''));
       $('lakehouse-list-message').textContent = '';
       if (!workspaceId) return;
+      const controller = new AbortController();
+      lakehouseRequestController = controller;
+      const timeout = setTimeout(() => controller.abort(), 30000);
       try {
-        const listed = await request(`/workspaces/${encodeURIComponent(workspaceId)}/lakehouses`);
+        const listed = await request(`/workspaces/${encodeURIComponent(workspaceId)}/lakehouses`,
+          {signal: controller.signal});
         if (requestVersion !== lakehouseRequestVersion || $('workspace').value !== workspaceId) return;
         lakehouses = listed;
         select.replaceChildren(new Option('Select a Lakehouse', ''));
@@ -312,10 +510,17 @@
       } catch (error) {
         if (requestVersion !== lakehouseRequestVersion || $('workspace').value !== workspaceId) return;
         select.replaceChildren(new Option('Lakehouses unavailable', ''));
-        $('lakehouse-list-message').textContent = error.message;
+        $('lakehouse-list-message').textContent = error.name === 'AbortError' ?
+          'Loading Lakehouses timed out. Check connectivity to Microsoft Entra and Fabric, then retry.' : error.message;
+        $('lakehouse-retry').classList.remove('hidden');
+        $('lakehouse-retry').disabled = false;
+      } finally {
+        clearTimeout(timeout);
+        if (lakehouseRequestController === controller) lakehouseRequestController = null;
       }
     }
     $('workspace').addEventListener('change', loadLakehouses);
+    $('lakehouse-retry').addEventListener('click', loadLakehouses);
     function showApproach() {
       $('schema-wrap').classList.toggle('hidden', $('approach').value !== 'ORACLE_TABLE');
       $('source-label').textContent = ({ORACLE_TABLE: 'Oracle source table',
@@ -348,10 +553,15 @@
     $('close-connection').addEventListener('click', () => $('connection-section').classList.add('hidden'));
     async function request(path, options) {
       const response = await fetch(path, options);
-      const body = await response.json().catch(() => ({}));
+      const body = await response.json().catch(error => {
+        if (error.name === 'AbortError') throw error;
+        return {};
+      });
       if (!response.ok) {
         const detail = Array.isArray(body.detail) ? body.detail.map(item => item.msg).join('; ') : body.detail;
-        throw new Error(typeof detail === 'string' ? detail : `Request failed (${response.status})`);
+        const error = new Error(typeof detail === 'string' ? detail : `Request failed (${response.status})`);
+        error.status = response.status;
+        throw error;
       }
       return body;
     }
@@ -413,23 +623,48 @@
           const analysis = current.phase === 'WAITING_FOR_ANALYSIS_APPROVAL';
           const plan = current.phase === 'WAITING_FOR_FABRIC_PLAN_APPROVAL';
           const mapping = current.phase === 'WAITING_FOR_COLUMN_MAPPING_APPROVAL';
+          const primaryKey = current.phase === 'WAITING_FOR_PRIMARY_KEY_APPROVAL';
+          const deletePolicy = current.phase === 'WAITING_FOR_DELETE_POLICY_APPROVAL';
           const watermark = current.phase === 'WAITING_FOR_WATERMARK_APPROVAL';
           const targetChange = current.phase === 'WAITING_FOR_TARGET_CHANGE_APPROVAL';
+          const runtimeGrid = !analysis && !plan && !mapping && !primaryKey && !deletePolicy && !watermark && !targetChange &&
+            Array.isArray(current.review.columns);
           const canFeedback = plan || (analysis && current.review.route === 'FUNCTION_MODULE');
           $('review-title').textContent = targetChange ? 'Existing target structure — change approval' :
-            mapping ? 'Oracle column mappings — step 1 of 2' :
-            watermark ? 'Oracle watermark — step 2 of 2' :
+            deletePolicy ? 'Oracle delete handling' : primaryKey ? 'Primary key fields' : mapping ? 'Oracle column mappings' :
+            watermark ? `${current.migration_approach === 'SAP_TABLE' ? 'SAP' : 'Oracle'} watermark` :
             analysis ? 'SAP analysis review' : plan ? 'Fabric plan review' : 'Runtime plan review';
           $('review').textContent = JSON.stringify(current.review, null, 2);
-          $('review').classList.toggle('hidden', mapping);
+          $('review').classList.toggle('hidden', mapping || primaryKey || runtimeGrid);
+          $('runtime-grid-wrap').classList.toggle('hidden', !runtimeGrid);
+          if (runtimeGrid) renderRuntimeGrid();
           $('column-grid-wrap').classList.toggle('hidden', !mapping);
           $('edit-columns').classList.toggle('hidden', !watermark);
+          const canEditKey = watermark && current.review.primary_key_source !== 'DATABASE' &&
+            (!(current.review.primary_key || []).length || current.review.primary_key_source);
+          $('edit-primary-key').classList.toggle('hidden', !canEditKey);
+          $('edit-primary-key').textContent = current.review.primary_key_source ?
+            'Edit primary key fields' : 'Specify primary key fields';
           $('approve').textContent = targetChange ? 'Record target change choice' :
+            deletePolicy ? 'Confirm delete policy and save plan' : primaryKey ? 'Confirm primary key decision' :
             mapping ? 'Confirm column mappings' :
-            watermark ? 'Confirm watermark and save plan' : 'Approve';
+            watermark ? (current.review.delete_policy_required ? 'Confirm replication method' : 'Confirm watermark and save plan') : 'Approve';
           if (mapping) renderColumnGrid();
           else $('column-grid-body').dataset.workflowId = '';
           $('watermark-wrap').classList.toggle('hidden', !watermark);
+          $('primary-key-wrap').classList.toggle('hidden', !primaryKey);
+          $('delete-policy-wrap').classList.toggle('hidden', !deletePolicy);
+          if (deletePolicy) {
+            renderDeletePolicy();
+            if (current.review.delete_policy_error) setReviewMessage(current.review.delete_policy_error);
+          }
+          if (primaryKey) {
+            $('primary-key-validation-help').textContent = current.review.key_validation_required ?
+              'Oracle will check all source rows for nulls and duplicate key combinations before continuing. Key fields must also remain stable.' :
+              'Selected fields must be unique together, contain no null values, and remain stable. Source data is not checked for this workflow.';
+            renderPrimaryKeyFields();
+            if (current.review.primary_key_error) setReviewMessage(current.review.primary_key_error);
+          }
           $('target-change-wrap').classList.toggle('hidden', !targetChange);
           if (targetChange) {
             const review = current.review.target_review;
@@ -441,7 +676,13 @@
             $('target-change-diff').textContent = [
               ...diff.added.map(item => `Added: ${item.name} ${item.fabric_type}`),
               ...diff.removed.map(item => `Removed: ${item.name} ${item.fabric_type}`),
-              ...diff.changed.map(item => `Changed: ${item.before.name} ${item.before.fabric_type} → ${item.after.fabric_type}`)
+              ...diff.changed.map(item => `Changed: ${item.before.name} ${item.before.fabric_type} → ${item.after.fabric_type}` +
+                (item.before.primary_key !== item.after.primary_key ? '; primary-key membership changed' : '') +
+                (item.before.source_type !== item.after.source_type ? `; source type ${item.before.source_type} → ${item.after.source_type}` : '') +
+                (item.before.nullable !== item.after.nullable ? '; nullability changed' : '') +
+                (item.before.description !== item.after.description ? '; description changed' : '')),
+              ...(selected.replication_comparison?.changed || []).map(item =>
+                `Replication ${item.name}: ${JSON.stringify(item.before)} → ${JSON.stringify(item.after)}`)
             ].join('\n') || 'No structural differences';
             const options = review.is_provisioned_record ? [
               ['ALTER_FUTURE', 'Alter columns; future data only'],
@@ -451,32 +692,55 @@
             const select = $('target-change-decision');
             if (select.dataset.workflowId !== current.workflow_id) {
               select.replaceChildren(new Option('Choose an action', ''),
-                ...options.map(([value, label]) => new Option(label, value)));
+                ...options.filter(([value]) => !review.allowed_decisions || review.allowed_decisions.includes(value))
+                  .map(([value, label]) => new Option(label, value)));
               select.dataset.workflowId = current.workflow_id;
             }
           }
-          if (watermark && $('watermark').dataset.workflowId !== current.workflow_id) {
+          const watermarkReviewKey = current.workflow_id + ':' + JSON.stringify(current.review.primary_key || []) +
+            ':' + (current.review.primary_key_source || '');
+          if (watermark && $('watermark').dataset.reviewKey !== watermarkReviewKey) {
             $('watermark').replaceChildren();
             const initial = new Option('Choose a replication method', '');
             const full = new Option('Full load (no watermark)', '__FULL__');
             $('watermark').append(initial, full);
             for (const candidate of current.review.watermark_candidates || []) {
-              const indexes = candidate.index_details.map(item => item.index_name);
+              const indexes = (candidate.index_details || []).map(item => item.index_name);
               const label = `${candidate.column_name} (${watermarkType(candidate)}; ${candidate.reason})` +
-                (indexes.length ? ` — index: ${indexes.join(', ')}` : ' — no index');
+                (indexes.length ? ` — index: ${indexes.join(', ')}` :
+                  current.migration_approach === 'SAP_TABLE' ? ' — index unverified' : ' — no index');
               const option = new Option(label, candidate.column_name);
               option.disabled = !(current.review.primary_key || []).length;
               $('watermark').append(option);
             }
-            $('watermark').dataset.workflowId = current.workflow_id;
+            if (current.review.primary_key_source === 'NONE') $('watermark').value = '__FULL__';
+            $('watermark').dataset.reviewKey = watermarkReviewKey;
           }
           if (watermark) showWatermarkChoice();
           $('feedback-wrap').classList.toggle('hidden', !canFeedback);
           $('feedback-send').classList.toggle('hidden', !canFeedback);
         }
         if (current.status !== 'RUNNING' && timer) { clearInterval(timer); timer = null; }
-      } catch (error) { setMessage(error.message); }
+      } catch (error) {
+        if (error.status === 404 || error.status === 410) {
+          if (timer) clearInterval(timer);
+          timer = null;
+          current = null;
+          if (localStorage.getItem('migrationWorkflowId') === id)
+            localStorage.removeItem('migrationWorkflowId');
+          for (const section of ['status', 'review-section', 'audit-section',
+            'provisioning-report-section', 'cancel']) $(section).classList.add('hidden');
+          $('empty').classList.remove('hidden');
+          setMessage(error.status === 404 ?
+            'Workflow was not found on the current Temporal server and namespace. Load another workflow ID or start a new migration.' : error.message);
+        } else setMessage(error.message);
+      }
       finally { refreshInProgress = false; }
+    }
+    async function trackWorkflow() {
+      if (timer) clearInterval(timer);
+      timer = setInterval(refresh, 5000);
+      await refresh();
     }
     $('start-form').addEventListener('submit', async event => {
       event.preventDefault();
@@ -501,23 +765,34 @@
           method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(data)});
         $('lookup').value = started.workflow_id;
         localStorage.setItem('migrationWorkflowId', started.workflow_id);
-        setMessage(''); await refresh();
-        if (timer) clearInterval(timer); timer = setInterval(refresh, 5000);
+        setMessage(''); await trackWorkflow();
       } catch (error) { setMessage(error.message); }
     });
-    $('load').addEventListener('click', async () => { await refresh(); if (timer) clearInterval(timer); timer = setInterval(refresh, 5000); });
+    $('load').addEventListener('click', trackWorkflow);
     async function sendAction(action) {
       if (!current) return;
       const analysis = current.phase === 'WAITING_FOR_ANALYSIS_APPROVAL';
       const mapping = current.phase === 'WAITING_FOR_COLUMN_MAPPING_APPROVAL';
+      const primaryKey = current.phase === 'WAITING_FOR_PRIMARY_KEY_APPROVAL';
+      const deletePolicy = current.phase === 'WAITING_FOR_DELETE_POLICY_APPROVAL';
       const watermark = current.phase === 'WAITING_FOR_WATERMARK_APPROVAL';
       const targetChange = current.phase === 'WAITING_FOR_TARGET_CHANGE_APPROVAL';
       const endpoint = action === 'feedback' ? (analysis ? 'analysis-feedback' : 'plan-feedback') :
-        `${action}-${targetChange ? 'target-change' : mapping ? 'columns' : watermark ? 'watermark' : analysis ? 'analysis' : 'plan'}`;
+        `${action}-${deletePolicy ? 'delete-policy' : targetChange ? 'target-change' : primaryKey ? 'primary-key' : mapping ? 'columns' : watermark ? 'watermark' : analysis ? 'analysis' : 'plan'}`;
       const actor = $('actor').value.trim();
       if (!actor) { setReviewMessage('Enter your name.'); return; }
       const body = action === 'feedback' ? {submitted_by:actor, message:$('feedback').value.trim()} :
         {approved_by:actor};
+      if (action === 'approve' && primaryKey) {
+        const choice = document.querySelector('input[name="primary-key-choice"]:checked')?.value;
+        if (!choice) { setReviewMessage('Specify primary key fields or choose no primary key.'); return; }
+        body.primary_key_columns = choice === 'none' ? [] :
+          [...$('primary-key-fields').querySelectorAll('input[data-primary-key-column]:checked')]
+            .map(input => input.dataset.primaryKeyColumn);
+        if (choice === 'fields' && !body.primary_key_columns.length) {
+          setReviewMessage('Select at least one primary key field.'); return;
+        }
+      }
       if (action === 'approve' && mapping) {
         body.columns = [...$('column-grid-body').querySelectorAll('input[data-column-name]')]
           .map(input => ({name:input.dataset.columnName, fabric_type:input.value.trim()}));
@@ -530,6 +805,32 @@
         const choice = $('watermark').value;
         if (!choice) { setReviewMessage('Choose a watermark column or full load before approving.'); return; }
         body.watermark_column = choice === '__FULL__' ? null : choice;
+      }
+      if (action === 'approve' && deletePolicy) {
+        const mode = $('delete-mode').value;
+        if (!mode) { setReviewMessage('Choose delete handling.'); return; }
+        const policy = {mode};
+        if (mode !== 'NONE') policy.behavior = $('delete-action').value;
+        if (['SOFT_DELETE', 'SOFT_DELETE_AND_RECONCILE'].includes(mode)) {
+          policy.soft_delete_column = $('soft-delete-column').value;
+          policy.soft_delete_predicate = $('soft-delete-predicate').value;
+          policy.soft_delete_values = $('soft-delete-values').value.split(/\r?\n/).filter(value => value.length);
+          policy.watermark_tracks_soft_delete = $('soft-delete-watermark-confirmed').checked;
+          if (!policy.soft_delete_column || (policy.soft_delete_predicate === 'VALUES' && !policy.soft_delete_values.length)) {
+            setReviewMessage('Choose a deletion field and supply its exact deletion values.'); return;
+          }
+          if (current.review.selected_watermark && !policy.watermark_tracks_soft_delete) {
+            setReviewMessage('Confirm deletion and restoration changes advance the watermark.'); return;
+          }
+        }
+        if (['RECONCILE', 'SOFT_DELETE_AND_RECONCILE'].includes(mode)) {
+          policy.reconcile_interval_minutes = Number($('reconcile-interval').value);
+          if (!Number.isInteger(policy.reconcile_interval_minutes) || policy.reconcile_interval_minutes < 15 ||
+              policy.reconcile_interval_minutes > 525600) {
+            setReviewMessage('Enter a reconciliation interval from 15 to 525600 minutes.'); return;
+          }
+        }
+        body.delete_policy = policy;
       }
       if (action === 'approve' && targetChange) {
         body.decision = $('target-change-decision').value;
@@ -550,6 +851,13 @@
       } catch (error) { setReviewMessage(error.message); }
     });
     $('feedback-send').addEventListener('click', () => sendAction('feedback'));
+    $('edit-primary-key').addEventListener('click', async () => {
+      if (!current) return;
+      try {
+        await request(`/migrations/${encodeURIComponent(current.workflow_id)}/edit-primary-key`, {method:'POST'});
+        setReviewMessage('Opening primary key selection…'); setTimeout(refresh, 500);
+      } catch (error) { setReviewMessage(error.message); }
+    });
     $('cancel').addEventListener('click', async () => {
       try { await request(`/migrations/${encodeURIComponent(current.workflow_id)}/cancel`, {method:'POST'}); setMessage('Cancellation requested.'); setTimeout(refresh, 800); }
       catch (error) { setMessage(error.message); }
@@ -560,11 +868,10 @@
     loadWorkspaces();
     if (saved) {
       $('lookup').value = saved;
-      refresh().then(() => {
+      trackWorkflow().then(() => {
         if (linked && !$('review-section').classList.contains('hidden'))
           $('review-section').scrollIntoView({behavior:'smooth'});
       });
-      timer = setInterval(refresh, 5000);
     }
   </script>
 </body>

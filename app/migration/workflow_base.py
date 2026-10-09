@@ -10,6 +10,9 @@ from temporalio import workflow
 from temporalio.common import RetryPolicy
 
 from .mapping_types import normalize_fabric_type
+from .primary_keys import validate_primary_key
+from thirdparty.delete_policy import validate_delete_policy
+from .target_review import allowed_target_decisions
 
 
 READ_RETRY = RetryPolicy(initial_interval=timedelta(seconds=2),
@@ -26,6 +29,8 @@ class MigrationWorkflowBase:
         self.state: dict = {}
         self._commands: list[dict] = []
         self._cancelled = False
+        self._oracle_key_checks = False
+        self._input: dict = {}
 
     @workflow.query
     def get_state(self) -> dict:
@@ -80,6 +85,111 @@ class MigrationWorkflowBase:
             column["warning"] = (f"User selected {column['fabric_type']}; verify source values fit"
                                  if column["mapping_changed"] else column["suggested_warning"])
         self.state["review"]["mapping_approved_by"] = actor
+
+    async def _choose_primary_key(self, discovered: dict) -> dict:
+        while True:
+            choice = await self._gate("WAITING_FOR_PRIMARY_KEY_APPROVAL",
+                                      ("approve_primary_key", "reject_primary_key"))
+            if choice["action"] == "reject_primary_key":
+                return {"action": "reject_plan"}
+            try:
+                if "primary_key_columns" not in choice or not choice.get("actor"):
+                    raise ValueError("Confirm the key fields or explicitly choose no primary key")
+                selected = validate_primary_key(choice["primary_key_columns"],
+                    [column["column_name"] for column in discovered["table_plan"]["columns"]])
+            except (ValueError, TypeError, AttributeError) as exc:
+                # Direct Temporal signals receive the same validation as API submissions.
+                self.state["review"]["primary_key_error"] = str(exc)
+                continue
+            review = self.state["review"]
+            if selected and self._oracle_key_checks and not await self._check_oracle_key(discovered, selected):
+                continue
+            if not selected:
+                review.pop("key_validation", None)
+                discovered["table_plan"]["replication"]["key_validation"] = None
+            review.pop("primary_key_error", None)
+            review.update(primary_key=selected, primary_key_source="USER" if selected else "NONE",
+                          primary_key_approved_by=choice["actor"])
+            planned = discovered["table_plan"]
+            for column in planned["columns"]:
+                column["is_primary_key"] = column["column_name"] in selected
+            planned["replication"]["primary_key_columns"] = selected or None
+            return choice
+
+    async def _check_oracle_key(self, discovered: dict, columns: list[str]) -> bool:
+        discovered["table_plan"]["replication"].pop("key_validation", None)
+        self._phase("VALIDATING_PRIMARY_KEY", message="Checking source key fields for nulls and duplicates")
+        try:
+            result = await self._activity("validate_oracle_key", {"input": self._input, "columns": columns},
+                                          timeout=300)
+        except Exception:
+            result = {"valid": False, "status": "UNVERIFIED", "columns": columns,
+                      "error": "Source key validation did not complete; retry or choose full load"}
+        self.state["review"]["key_validation"] = result
+        if (result.get("valid") is not True or result.get("columns") != columns
+                or result.get("status") != "CHECKED" or result.get("scope") != "FULL_TABLE"):
+            reasons = [label for field, label in (("has_nulls", "null key values"),
+                       ("has_duplicates", "duplicate key combinations")) if result.get(field)]
+            self.state["review"]["primary_key_error"] = (
+                "Key validation failed: " + ", ".join(reasons) if reasons else
+                result.get("error", "Key could not be verified; retry or choose full load"))
+            return False
+        discovered["table_plan"]["replication"]["key_validation"] = result
+        self.state["review"].pop("primary_key_error", None)
+        return True
+
+    async def _delete_policy_gate(self, discovered: dict) -> dict:
+        review = self.state["review"]
+        review["delete_policy_required"] = True
+        while True:
+            choice = await self._gate("WAITING_FOR_DELETE_POLICY_APPROVAL",
+                                      ("approve_delete_policy", "reject_delete_policy"))
+            if choice["action"] == "reject_delete_policy":
+                return {"action": "reject_plan"}
+            try:
+                if not choice.get("actor"):
+                    raise ValueError("Delete policy approval requires an actor")
+                replication = discovered["table_plan"]["replication"]
+                policy = validate_delete_policy(choice.get("delete_policy"),
+                    [column["column_name"] for column in discovered["table_plan"]["columns"]],
+                    replication.get("primary_key_columns") or [], replication.get("watermark_column"))
+                if policy["mode"] != "NONE" and (replication.get("key_validation") or {}).get("valid") is not True:
+                    raise ValueError("Delete propagation requires successful source key validation")
+                replication["delete_policy"] = policy
+                review.update(delete_policy=policy, delete_policy_approved_by=choice["actor"])
+                review.pop("delete_policy_error", None)
+                return choice
+            except (ValueError, TypeError) as exc:
+                review["delete_policy_error"] = str(exc)
+
+    async def _watermark_gate(self, discovered: dict, *, review_key: bool) -> dict:
+        review = self.state["review"]
+        keys = discovered["table_plan"]["replication"].get("primary_key_columns") or []
+        if self._oracle_key_checks and keys and not discovered["table_plan"]["replication"].get("key_validation"):
+            if not await self._check_oracle_key(discovered, keys):
+                choice = await self._choose_primary_key(discovered)
+                if choice["action"] == "reject_plan":
+                    return choice
+        if review_key and not discovered["table_plan"]["replication"].get("primary_key_columns"):
+            if review.get("primary_key_source") != "NONE":
+                key_choice = await self._choose_primary_key(discovered)
+                if key_choice["action"] == "reject_plan":
+                    return key_choice
+        while True:
+            choice = await self._gate("WAITING_FOR_WATERMARK_APPROVAL",
+                ("approve_watermark", "reject_watermark", "edit_columns", "edit_primary_key"))
+            if choice["action"] != "edit_primary_key":
+                return choice
+            # This marker is first reached after the new command, so already-waiting
+            # executions can enter key review without changing their earlier history.
+            if workflow.patched("manual-primary-key-edit-v1"):
+                if (review.get("primary_key_source") == "DATABASE"
+                        or (discovered["table_plan"]["replication"].get("primary_key_columns")
+                            and not review.get("primary_key_source"))):
+                    continue
+                key_choice = await self._choose_primary_key(discovered)
+                if key_choice["action"] == "reject_plan":
+                    return key_choice
 
     async def _watch_job(self, input: dict, *, kind: str, job_id: str) -> dict:
         status_activity = "get_provisioning_status" if kind == "provisioning" else "get_replication_status"
@@ -187,6 +297,7 @@ class MigrationWorkflowBase:
         self.state["replication_status"] = "SKIPPED"
 
     async def _run(self, input: dict, discovery_activity: str) -> dict:
+        self._input = input
         info = workflow.info()
         self.state = {"workflow_id": info.workflow_id, "migration_approach": input["migration_approach"],
                       "source_object_name": input["source_object_name"], "phase": "CREATED",
@@ -219,9 +330,25 @@ class MigrationWorkflowBase:
                 self.state["status"] = "FAILED"
                 return self.state
             self.state["review"] = discovered["review"]
+            oracle_delete_policy = (input["migration_approach"] == "ORACLE_TABLE"
+                                    and workflow.patched("oracle-key-validation-delete-policy-v1"))
+            self._oracle_key_checks = oracle_delete_policy
+            if oracle_delete_policy:
+                self.state["review"]["key_validation_required"] = True
+                self.state["review"]["delete_policy_required"] = True
+            sap_watermark = (input["migration_approach"] == "SAP_TABLE"
+                             and workflow.patched("sap-table-watermark-approval-v1"))
+            review_key = ((input["migration_approach"] == "ORACLE_TABLE" or sap_watermark)
+                          and workflow.patched("manual-primary-key-approval-v1"))
+            if review_key:
+                keys = discovered["table_plan"]["replication"].get("primary_key_columns") or []
+                self.state["review"]["primary_key"] = keys
+                self.state["review"]["primary_key_source"] = "DATABASE" if keys else None
             self._phase("BUILDING_PLAN")
             await self._activity("transition_plan", {"plan_guid": guid, "version": 1,
                 "expected": "DRAFT", "target": "WAITING_PLAN_APPROVAL"})
+            sap_target_change = (input["migration_approach"] == "SAP_TABLE"
+                                 and workflow.patched("sap-existing-target-changes-v1"))
             if input["migration_approach"] == "ORACLE_TABLE":
                 while True:
                     mapping_choice = await self._gate("WAITING_FOR_COLUMN_MAPPING_APPROVAL",
@@ -231,23 +358,31 @@ class MigrationWorkflowBase:
                         break
                     self._apply_oracle_column_mappings(discovered, mapping_choice["columns"],
                                                        mapping_choice["actor"])
-                    choice = await self._gate("WAITING_FOR_WATERMARK_APPROVAL",
-                                              ("approve_watermark", "reject_watermark", "edit_columns"))
+                    choice = await self._watermark_gate(discovered, review_key=review_key)
                     if choice["action"] == "edit_columns":
                         continue
                     if choice["action"] == "reject_watermark":
                         choice = {"action": "reject_plan"}
                     break
             else:
-                choice = await self._gate("WAITING_FOR_PLAN_APPROVAL",
-                                          ("approve_plan", "reject_plan"))
+                while True:
+                    choice = await self._gate("WAITING_FOR_PLAN_APPROVAL",
+                                              ("approve_plan", "reject_plan"))
+                    if not sap_watermark or choice["action"] == "reject_plan":
+                        break
+                    choice = await self._watermark_gate(discovered, review_key=review_key)
+                    if choice["action"] == "edit_columns":
+                        continue
+                    if choice["action"] == "reject_watermark":
+                        choice = {"action": "reject_plan"}
+                    break
             if choice["action"] == "reject_plan":
                 await self._activity("transition_plan", {"plan_guid": guid, "version": 1,
                     "expected": "WAITING_PLAN_APPROVAL", "target": "REJECTED"})
                 self._phase("REJECTED")
                 self.state["status"] = "REJECTED"
                 return self.state
-            if input["migration_approach"] == "ORACLE_TABLE" and choice.get("watermark_column"):
+            if (input["migration_approach"] == "ORACLE_TABLE" or sap_watermark) and choice.get("watermark_column"):
                 selected = next((item for item in discovered["review"]["watermark_candidates"]
                                  if item["column_name"] == choice["watermark_column"]), None)
                 if selected is None:
@@ -255,7 +390,7 @@ class MigrationWorkflowBase:
                 replication = discovered["table_plan"]["replication"]
                 if not replication.get("primary_key_columns"):
                     raise ValueError("Watermark upserts require a primary key")
-                indexes = sorted(selected["index_details"],
+                indexes = sorted(selected.get("index_details", []),
                                  key=lambda item: (item["column_position"] != 1,
                                                    item["index_name"]))
                 index_name = indexes[0]["index_name"] if indexes else None
@@ -268,16 +403,27 @@ class MigrationWorkflowBase:
                 self.state["review"]["selected_watermark_index"] = index_name
                 self.state["review"]["load_method"] = "WATERMARK"
                 self.state["review"]["write_strategy"] = "UPSERT"
-            if input["migration_approach"] == "ORACLE_TABLE":
+            if oracle_delete_policy:
+                choice = await self._delete_policy_gate(discovered)
+                if choice["action"] == "reject_plan":
+                    await self._activity("transition_plan", {"plan_guid": guid, "version": 1,
+                        "expected": "WAITING_PLAN_APPROVAL", "target": "REJECTED"})
+                    self._phase("REJECTED")
+                    self.state["status"] = "REJECTED"
+                    return self.state
+            if input["migration_approach"] == "ORACLE_TABLE" or sap_target_change:
                 self._phase("CHECKING_EXISTING_TARGET")
+                review_payload = {"plan_guid": guid, "table_plan": discovered["table_plan"]}
+                if sap_target_change or oracle_delete_policy:
+                    review_payload["review_replication"] = True
                 target_review = await self._activity("review_existing_target",
-                    {"plan_guid": guid, "table_plan": discovered["table_plan"]},
+                    review_payload,
                     retry=READ_RETRY)
                 definitions = target_review["definitions"]
                 if definitions:
                     self.state["review"]["target_review"] = target_review
                     exact = next((item for item in definitions
-                                  if item["comparison"]["same"]), None)
+                                  if item.get("same", item["comparison"]["same"])), None)
                     if exact:
                         message = ("This target already has the same saved structure in "
                                    f"plan {exact['plan_guid']}. No second configuration was saved.")
@@ -291,6 +437,8 @@ class MigrationWorkflowBase:
                     target_review["selected_existing_guid"] = existing["source_table_guid"]
                     target_review["is_provisioned_record"] = (
                         existing["provisioning_status"] == "PROVISIONED")
+                    if sap_target_change or oracle_delete_policy:
+                        target_review["allowed_decisions"] = sorted(allowed_target_decisions(target_review))
                     self.state["review"]["target_review"] = target_review
                     requested = await self._gate("WAITING_FOR_TARGET_CHANGE_APPROVAL",
                                                  ("approve_target_change", "reject_target_change"))
@@ -303,6 +451,8 @@ class MigrationWorkflowBase:
                     decision = requested["decision"]
                     allowed = ({"ALTER_FUTURE", "ALTER_BACKFILL", "REPLACE_FULL"}
                                if target_review["is_provisioned_record"] else {"REVISE_PLANNED"})
+                    if sap_target_change or oracle_delete_policy:
+                        allowed = allowed_target_decisions(target_review)
                     if decision not in allowed:
                         raise ValueError("Target change decision is incompatible with existing target")
                     await self._activity("record_target_change_request", {
@@ -322,8 +472,13 @@ class MigrationWorkflowBase:
             await self._activity("approve_runtime_plan", {"plan_guid": guid, "version": 1,
                                                             "approved_by": choice["actor"]})
             self._phase("PERSISTING_RUNTIME_CONFIG")
-            await self._activity("persist_runtime_plan", {"plan_guid": guid,
-                "plan_version": 1, "tables": [discovered["table_plan"]], "views": []})
+            persistence = {"plan_guid": guid, "plan_version": 1,
+                           "tables": [discovered["table_plan"]], "views": []}
+            if workflow.patched("runtime-config-persistence-budget-v1"):
+                # Persistence is transactional and fingerprinted, so a lost response is retryable.
+                await self._activity("persist_runtime_plan", persistence, timeout=180, retry=WRITE_RETRY)
+            else:
+                await self._activity("persist_runtime_plan", persistence)
             if input.get("provisioning_notebook_id"):
                 # Keep the old command sequence for histories that already submitted a pipeline.
                 if workflow.patched("structure-only-migration-v1"):

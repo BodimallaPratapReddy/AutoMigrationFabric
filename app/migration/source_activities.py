@@ -29,7 +29,10 @@ def discover_sap_table(payload: dict) -> dict:
         schema = client.get_table_schema(input.source_object_name)
         watermark = client.get_watermark_candidates(input.source_object_name)
     planned, review = sap_table_plan(input, payload["lakehouse_name"], schema)
-    review["watermark_candidates"] = [item.model_dump(mode="json") for item in watermark]
+    review["watermark_candidates"] = [
+        {"column_name": item.field_name, "data_type": item.datatype,
+         "indexed": item.indexed, "nullable": item.nullable,
+         "index_details": [], "reason": item.reason} for item in watermark]
     return {"table_plan": planned.model_dump(mode="json"), "review": review}
 
 
@@ -65,4 +68,16 @@ def discover_sap_odp(payload: dict) -> dict:
     return {"table_plan": planned.model_dump(mode="json"), "review": review}
 
 
-ACTIVITIES = [discover_oracle, discover_sap_table, discover_sap_odp]
+@activity.defn(name="validate_oracle_key")
+def validate_oracle_key(payload: dict) -> dict:
+    input = MigrationInput.model_validate(payload["input"])
+    try:
+        return oracle_client(input.source_connection_name).validate_replication_key(
+            input.source_schema_name, input.source_object_name, payload["columns"])
+    except Exception as exc:
+        # Credentials, SQL errors, and sampled source values must not enter workflow history.
+        return {"valid": False, "status": "UNVERIFIED", "columns": payload["columns"],
+                "error": f"Source key check could not complete ({type(exc).__name__}); retry or use full load"}
+
+
+ACTIVITIES = [discover_oracle, discover_sap_table, discover_sap_odp, validate_oracle_key]

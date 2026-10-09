@@ -12,7 +12,8 @@ from .fabric_activities import ACTIVITIES as FABRIC_ACTIVITIES
 from .rebuild_activities import ACTIVITIES as REBUILD_ACTIVITIES
 from .source_activities import ACTIVITIES as SOURCE_ACTIVITIES
 from .workflows import WORKFLOWS
-
+import truststore
+truststore.inject_into_ssl()
 
 TASK_QUEUE = os.getenv("MIGRATION_TASK_QUEUE", "migration-workflows")
 

@@ -6,7 +6,8 @@ from pathlib import Path
 from app.migration.api import router as migration_router
 from app.migration.connections_api import router as connections_router
 from app.migration.workspaces_api import router as workspaces_router
-
+import truststore
+truststore.inject_into_ssl()
 
 class HealthResponse(BaseModel):
     status: str
