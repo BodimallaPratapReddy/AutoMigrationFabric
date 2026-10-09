@@ -8,9 +8,38 @@ from thirdparty.configdb.repository import (
 )
 from thirdparty.datatype_mapping import map_oracle_table_columns, map_sap_field
 from thirdparty.oracle.utils import OracleTableInspection
-from thirdparty.sap.utils import SAPDeltaDetails, SAPODPCapability, SAPTableSchema
+from thirdparty.sap.utils import SAPDeltaDetails, SAPODPCapability, SAPTableSchema, is_sap_watermark_field
 
 from .contracts import MigrationInput
+
+
+def oracle_primary_key_candidates(inspection: OracleTableInspection) -> list[dict]:
+    """Propose ordinary unique indexes; selection still requires user approval."""
+    if inspection.primary_key:
+        return []
+    columns = {column.column_name: column for column in inspection.columns}
+    candidates = []
+    for index in inspection.indexes:
+        names = [column.name for column in sorted(index.columns, key=lambda column: column.position)]
+        if (index.uniqueness.upper() != "UNIQUE"
+                or index.index_type.upper() not in {"NORMAL", "NORMAL/REV", "IOT - TOP"}
+                or index.status == "UNUSABLE" or not names
+                or any(name not in columns for name in names)):
+            continue
+        warnings = []
+        nullable = [name for name in names if columns[name].nullable is True]
+        unknown = [name for name in names if columns[name].nullable is None]
+        if nullable:
+            warnings.append("Nullable key fields require a source null check: " + ", ".join(nullable))
+        if unknown:
+            warnings.append("Nullability is unknown: " + ", ".join(unknown))
+        if index.status != "VALID":
+            warnings.append("Index/partition usability needs verification")
+        candidates.append({"index_name": index.index_name, "columns": names,
+                           "source": "UNIQUE_INDEX", "warnings": warnings,
+                           "reason": "Unique source index; confirm non-null values and stable row identity"})
+    return sorted(candidates, key=lambda candidate: (
+        bool(candidate["warnings"]), len(candidate["columns"]), candidate["index_name"]))
 
 
 def _table(input: MigrationInput, lakehouse_name: str, *, object_type: str,
@@ -61,6 +90,8 @@ def oracle_plan(input: MigrationInput, lakehouse_name: str,
     return plan, {"source": f"{inspection.schema_name}.{inspection.table_name}",
                   "columns": review_columns, "primary_key": sorted(keys),
                   "unique_keys": [key.model_dump(mode="json") for key in inspection.unique_keys],
+                  "indexes": [index.model_dump(mode="json") for index in inspection.indexes],
+                  "primary_key_candidates": oracle_primary_key_candidates(inspection),
                   "watermark_candidates": [x.model_dump(mode="json") for x in inspection.watermark_candidates],
                   "load_method": "FULL", "write_strategy": "REPLACE",
                   "warnings": inspection.warnings}
@@ -82,7 +113,7 @@ def sap_table_plan(input: MigrationInput, lakehouse_name: str,
             sno=field.position, column_name=field.fieldname,
             source_data_type=mapping.source_type, fabric_data_type=mapping.fabric_type,
             description=field.ddtext, is_primary_key=field.fieldname in keys,
-            is_watermark_candidate=field.datatype.upper() in {"DATS", "TIMS", "TIMESTAMP", "UTCLONG"}))
+            is_watermark_candidate=is_sap_watermark_field(field)))
     # An unresolved SAP delta indicator is never treated as a working delta route.
     use_delta = bool(delta and delta.details_resolved and delta.delta_supported is True)
     method = "SAP_ODP_DELTA" if use_delta else "FULL"

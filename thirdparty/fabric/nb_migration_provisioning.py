@@ -1,7 +1,8 @@
 # Fabric provisioning script. In Fabric, mark the first code cell as parameters.
-# Install python-oracledb in the Fabric environment for Oracle data movement.
+# Source row loading belongs exclusively to the scheduled replication pipeline.
+# Historical reload requests reset ReplicationState.LastWatermarkValue to NULL.
 # Apply configdb/migrations/003_target_change_runs.sql before ALTER_BACKFILL or
-# REPLACE_FULL, attach the approved Lakehouse, and schedule an Oracle write pause.
+# REPLACE_FULL and attach the approved Lakehouse. The scheduled loader must be idle.
 # %%
 plan_guid = ""  # Required Text parameter supplied by the app
 CREATIONREQUEST = "BOTH"  # Optional manual scope: TABLE, VIEW, BOTH
@@ -213,7 +214,6 @@ import re
 import sys
 import time
 import uuid
-from decimal import Decimal, InvalidOperation, localcontext
 from concurrent.futures import ThreadPoolExecutor, wait
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
@@ -380,9 +380,16 @@ def validate_identifier(name: Any, what: str) -> str:
     return name
 
 
-def quote_ident(name: str) -> str:
+def validate_column_identifier(name: Any) -> str:
+    """SAP namespace slashes are literal column characters, never SQL delimiters."""
+    if not isinstance(name, str) or not re.fullmatch(r"[A-Za-z0-9_/$#]{1,128}", name):
+        raise ValidationError("Invalid column name")
+    return name
+
+
+def quote_ident(name: str, *, column: bool = False) -> str:
     """Validate and back-tick quote an identifier for Spark SQL."""
-    return f"`{validate_identifier(name, 'identifier')}`"
+    return f"`{validate_column_identifier(name) if column else validate_identifier(name, 'identifier')}`"
 
 
 def sql_literal(text: str) -> str:
@@ -689,7 +696,7 @@ def _clean_text(value: Any) -> Optional[str]:
 
 def build_column(row: Dict[str, Any]) -> ColumnDef:
     """Convert one ``SourceTableColumns`` row into a validated :class:`ColumnDef`."""
-    name = validate_identifier(row.get("TargetColumnName") or row["ColumnName"], "column name")
+    name = validate_column_identifier(row.get("TargetColumnName") or row["ColumnName"])
     raw_nullable = row.get("IsNullable")
     known = raw_nullable is not None
     is_pk = bool(row.get("IsPrimaryKey"))
@@ -858,28 +865,19 @@ class ConfigRepository:
     def get_replication_config(self, source_table_guid: str) -> Optional[Dict[str, Any]]:
         return self._db.fetch_one(
             f"SELECT IncrementalMethod, WriteStrategy, PrimaryKeyColumns, MergeKeyColumns, "
-            f"WatermarkColumn, IngestionFlag "
+            f"WatermarkColumn, WatermarkColumnDataType, WatermarkIndexName, EffectiveFromColumn, "
+            f"EffectiveToColumn, CurrentFlagColumn, MaxRowFetch, PipelineWorkspaceId, PipelineItemId, IngestionFlag, "
+            f"DeletePolicy, KeyValidation "
             f"FROM {self._s}.ReplicationConfig WHERE SourceTableGUID = ?", (source_table_guid,))
 
-    def assert_replication_idle(self, source_table_guid: str) -> None:
+    def assert_replication_idle(self, source_table_guid: str, *, require_state: bool = False) -> None:
         row = self._db.fetch_one(
             f"SELECT Status FROM {self._s}.ReplicationState WHERE SourceTableGUID = ?",
             (source_table_guid,))
+        if require_state and row is None:
+            raise TargetStateError('ReplicationState row is required to reset the watermark.')
         if row and str(row['Status']).upper() == 'RUNNING':
             raise TargetStateError('A replication batch is running; wait for it to finish before changing the target.')
-
-    def get_oracle_source(self, source_table_guid: str) -> Dict[str, Any]:
-        row = self._db.fetch_one(
-            f"SELECT st.ConnectionName, st.SourceSchemaName, st.SourceTableName, "
-            f"st.SourceSystemType, dc.SourceType, dc.ConnectionDetails "
-            f"FROM {self._s}.SourceTables st JOIN {self._s}.DBConnections dc "
-            f"ON dc.ConnectionName = st.ConnectionName WHERE st.GUID = ? AND dc.IsActive = 1",
-            (source_table_guid,))
-        if row is None or str(row['SourceSystemType']).upper() != 'ORACLE' or str(row['SourceType']).upper() != 'ORACLE':
-            raise ValidationError('An active Oracle source connection is required for data movement.')
-        validate_oracle_identifier(row['SourceSchemaName'], 'Oracle schema')
-        validate_oracle_identifier(row['SourceTableName'], 'Oracle table')
-        return row
 
     def begin_change_run(self, plan_guid: str, target_guid: str, action: str, stage_name: str) -> None:
         """Reserve the approved plan; a prior physical mutation requires manual reconciliation."""
@@ -927,13 +925,15 @@ class ConfigRepository:
     def apply_metadata_change(self, source_table_guid: str, expected_status: str,
                               column_rows: Sequence[Tuple[Any, ...]], replication_updates: Dict[str, Any],
                               complete_run_guid: Optional[str] = None,
-                              resume_ingestion: Optional[bool] = None) -> None:
+                              resume_ingestion: Optional[bool] = None,
+                              reset_watermark: bool = False) -> None:
         """
         Replace the recorded columns and update ReplicationConfig in ONE transaction.
 
         The SourceTables row is locked and must still have ``expected_status`` and be active
-        (a precondition that protects against concurrent edits). ReplicationState is never touched,
-        so the watermark stays unchanged.
+        (a precondition that protects against concurrent edits). Historical reload requests reset
+        the watermark to NULL and mark state NOT_STARTED in this same transaction.
+        Prior run IDs, timestamps and row counts remain available for audit.
         """
         s = self._s
         with self._db.transaction():
@@ -959,6 +959,13 @@ class ConfigRepository:
             if self._db.execute(f"UPDATE {s}.SourceTables SET UpdatedTimestamp = SYSUTCDATETIME() WHERE GUID = ?",
                                 (source_table_guid,)) != 1:
                 raise TargetStateError("Target record disappeared; nothing was saved.")
+            if reset_watermark and self._db.execute(
+                    f"UPDATE {s}.ReplicationState SET LastWatermarkValue = NULL, Status = 'NOT_STARTED', "
+                    f"LastReconciledTimestamp = NULL, LastReconciledSCN = NULL, "
+                    f"ErrorMessage = NULL, UpdatedTimestamp = SYSUTCDATETIME() "
+                    f"WHERE SourceTableGUID = ? AND Status <> 'RUNNING'",
+                    (source_table_guid,)) != 1:
+                raise TargetStateError('Replication state is missing or running; watermark was not reset.')
             if complete_run_guid and self._db.execute(
                     f"UPDATE {s}.TargetChangeRuns SET Phase = 'COMPLETED', "
                     f"UpdatedTimestamp = SYSUTCDATETIME() "
@@ -994,6 +1001,7 @@ class TargetChange:
     columns: Tuple[ColumnDef, ...]            # proposed columns
     replication: Dict[str, Any]               # proposed replication settings (may be empty)
     approved_comparison: Optional[Dict[str, Any]]
+    approved_replication: Optional[Dict[str, Any]] = None
 
     @property
     def display(self) -> str:
@@ -1022,14 +1030,16 @@ def parse_target_change(notes: Optional[str]) -> TargetChange:
         raise ValidationError("target_change.proposed_plan.columns is missing.")
     columns = validate_columns([build_column_from_plan(c) for c in raw_columns if c.get("is_selected", True)])
     review = data.get("review") if isinstance(data.get("review"), dict) else {}
-    comparison = None
+    comparison = replication_comparison = None
     for definition in review.get("definitions") or []:
         if isinstance(definition, dict) and is_valid_uuid(definition.get("source_table_guid")) \
                 and norm_guid(definition["source_table_guid"]) == norm_guid(guid):
             comparison = definition.get("comparison")
+            replication_comparison = definition.get("replication_comparison")
     replication = proposed.get("replication") if isinstance(proposed.get("replication"), dict) else {}
     return TargetChange(decision, norm_guid(guid), review.get("target") or {}, proposed["table"], columns,
-                        replication, comparison if isinstance(comparison, dict) else None)
+                        replication, comparison if isinstance(comparison, dict) else None,
+                        replication_comparison if isinstance(replication_comparison, dict) else None)
 
 
 def verify_target_agreement(change: TargetChange, live: LakehouseTarget) -> None:
@@ -1136,7 +1146,45 @@ REPLICATION_FIELDS = {
     "merge_key_columns": "MergeKeyColumns", "effective_from_column": "EffectiveFromColumn",
     "effective_to_column": "EffectiveToColumn", "current_flag_column": "CurrentFlagColumn",
     "max_row_fetch": "MaxRowFetch", "pipeline_workspace_id": "PipelineWorkspaceId", "pipeline_item_id": "PipelineItemId",
+    "delete_policy": "DeletePolicy", "key_validation": "KeyValidation",
 }
+
+
+def check_replication_approval(change: TargetChange, config: Optional[Dict[str, Any]]) -> None:
+    """New SAP approvals include a baseline; older Oracle notes retain their contract."""
+    if change.approved_replication is None:
+        return
+    if config is None:
+        raise TargetStateError('Replication configuration is missing; request a fresh review.')
+    baseline = change.approved_replication.get('before')
+    if not isinstance(baseline, dict):
+        raise ValidationError('Approved replication baseline is missing.')
+    for key, expected in baseline.items():
+        if key not in REPLICATION_FIELDS:
+            raise ValidationError('Unknown approved replication setting.')
+        actual = config.get(REPLICATION_FIELDS[key])
+        if key == 'delete_policy':
+            actual = json.loads(actual) if isinstance(actual, str) else actual
+            actual = actual or {"mode": "NONE"}
+        elif key in ('primary_key_columns', 'merge_key_columns'):
+            actual = sorted(x.upper() for x in (_json_name_set(actual) or set()))
+        elif isinstance(actual, str):
+            actual = actual.upper()
+        if actual != expected:
+            raise TargetStateError('Replication configuration changed since approval; request a fresh review.')
+
+
+def check_watermark_stability(config: Optional[Dict[str, Any]], proposed: Dict[str, Any]) -> None:
+    if not config:
+        return
+    for key in ('incremental_method', 'watermark_column', 'watermark_column_data_type'):
+        if key in proposed and str(config.get(REPLICATION_FIELDS[key]) or '').upper() != str(proposed[key] or '').upper():
+            raise UnsafeChangeError('Watermark definition changes require ALTER_BACKFILL or REPLACE_FULL to reset state.')
+    if 'delete_policy' in proposed:
+        old_policy = config.get('DeletePolicy')
+        old_policy = json.loads(old_policy) if isinstance(old_policy, str) else old_policy
+        if (old_policy or {'mode': 'NONE'}) != (proposed['delete_policy'] or {'mode': 'NONE'}):
+            raise UnsafeChangeError('Delete policy changes require ALTER_BACKFILL or REPLACE_FULL for a fresh baseline.')
 
 
 def replication_updates(replication: Dict[str, Any]) -> Dict[str, Any]:
@@ -1285,7 +1333,7 @@ def structure_matches(physical: Sequence[PhysicalColumn], columns: Sequence[Colu
 
 def column_ddl(col: ColumnDef) -> str:
     """Column fragment ``name TYPE [NOT NULL] [COMMENT '...']`` for CREATE / ADD COLUMNS."""
-    parts = [quote_ident(col.name), col.fabric_type]
+    parts = [quote_ident(col.name, column=True), col.fabric_type]
     if not col.nullable:
         parts.append("NOT NULL")
     if col.description:
@@ -1321,21 +1369,26 @@ class DeltaTableManager:
         spec.target.preflight(self.spark, ensure_schema=True)
         self.spark.sql(build_create_table_sql(spec))
 
+    def replace_empty(self, spec: TableSpec) -> None:
+        """Replace the target with its approved schema and zero rows; the pipeline loads it."""
+        spec.target.preflight(self.spark, ensure_schema=True)
+        self.spark.sql(build_create_table_sql(spec, or_replace=True))
+
     def apply(self, spec: TableSpec, diff: SchemaDiff) -> None:
         """Apply an already-validated diff (no rejections) in a safe order."""
         fq = spec.target.fq
         if diff.widened:
             self.spark.sql(f"ALTER TABLE {fq} SET TBLPROPERTIES ('delta.enableTypeWidening' = 'true')")
             for col, _old in diff.widened:
-                self.spark.sql(f"ALTER TABLE {fq} ALTER COLUMN {quote_ident(col.name)} TYPE {col.fabric_type}")
+                self.spark.sql(f"ALTER TABLE {fq} ALTER COLUMN {quote_ident(col.name, column=True)} TYPE {col.fabric_type}")
         if diff.added:
             self.spark.sql(f"ALTER TABLE {fq} ADD COLUMNS ({', '.join(column_ddl(c) for c in diff.added)})")
         for col in diff.relaxed:
-            self.spark.sql(f"ALTER TABLE {fq} ALTER COLUMN {quote_ident(col.name)} DROP NOT NULL")
+            self.spark.sql(f"ALTER TABLE {fq} ALTER COLUMN {quote_ident(col.name, column=True)} DROP NOT NULL")
         added_names = {c.name.lower() for c in diff.added}      # their comment is already in ADD COLUMNS
         for col in diff.comments:
             if col.name.lower() not in added_names:
-                self.spark.sql(f"ALTER TABLE {fq} ALTER COLUMN {quote_ident(col.name)} "
+                self.spark.sql(f"ALTER TABLE {fq} ALTER COLUMN {quote_ident(col.name, column=True)} "
                                f"COMMENT {sql_literal(col.description or '')}")
 
     def verify(self, spec: TableSpec) -> None:
@@ -1345,281 +1398,6 @@ class DeltaTableManager:
             raise TargetStateError("Physical schema does not match the configuration after the change: "
                                    + "; ".join(leftover.rejected or [leftover.summary()]))
 
-
-# %% [markdown]
-# ## 7b. Oracle snapshot and staged data movement
-# A SHARE lock holds source DML until the Delta and Config DB changes finish. This
-# deliberately requires a maintenance window; without CDC, releasing that lock
-# during a full copy would allow missed updates and deletes.
-
-# %%
-_ORACLE_IDENTIFIER = re.compile(r"^[A-Za-z][A-Za-z0-9_$#]*$")
-
-
-def validate_oracle_identifier(value: Any, label: str) -> str:
-    if not isinstance(value, str) or not _ORACLE_IDENTIFIER.fullmatch(value):
-        raise ValidationError(f'{label} must be an ordinary Oracle identifier.')
-    return value.upper()
-
-
-def quote_oracle_identifier(value: str) -> str:
-    return '"' + validate_oracle_identifier(value, 'Oracle identifier') + '"'
-
-
-def oracle_dsn(details: Dict[str, Any]) -> str:
-    dsn = details.get('dsn')
-    if isinstance(dsn, str) and dsn.strip():
-        return dsn.strip()
-    host, service = details.get('host'), details.get('serviceName') or details.get('service_name')
-    port = details.get('port', 1521)
-    if not isinstance(host, str) or not host.strip() or not isinstance(service, str) or not service.strip():
-        raise ValidationError('Oracle connection needs a DSN or host and service name.')
-    if not isinstance(port, int) or isinstance(port, bool) or not (1 <= port <= 65535):
-        raise ValidationError('Oracle connection port is invalid.')
-    return f'{host.strip()}:{port}/{service.strip()}'
-
-
-def parse_oracle_connection(source: Dict[str, Any]) -> Tuple[str, str, str]:
-    try:
-        details = source['ConnectionDetails']
-        if isinstance(details, str):
-            details = json.loads(details)
-        if not isinstance(details, dict):
-            raise ValueError('invalid JSON object')
-        username, password = details.get('username'), details.get('password')
-        if not isinstance(username, str) or not username or not isinstance(password, str) or not password:
-            raise ValueError('missing credentials')
-        return username, password, oracle_dsn(details)
-    except (KeyError, TypeError, ValueError) as exc:
-        raise ValidationError('Oracle connection details are incomplete or invalid.') from exc
-
-
-class OracleSnapshot:
-    """Exclusive-to-this-run Oracle read with a held SHARE table lock and fixed SCN."""
-
-    def __init__(self, source: Dict[str, Any]) -> None:
-        self.source = source
-        self.connection: Any = None
-        self.scn: Optional[int] = None
-
-    def __enter__(self) -> 'OracleSnapshot':
-        import oracledb  # installed in the Fabric notebook environment
-        username, password, dsn = parse_oracle_connection(self.source)
-        try:
-            self.connection = oracledb.connect(user=username, password=password, dsn=dsn)
-            table = (f"{quote_oracle_identifier(self.source['SourceSchemaName'])}."
-                     f"{quote_oracle_identifier(self.source['SourceTableName'])}")
-            with self.connection.cursor() as cursor:
-                cursor.execute(f'LOCK TABLE {table} IN SHARE MODE NOWAIT')
-                cursor.execute('SELECT DBMS_FLASHBACK.GET_SYSTEM_CHANGE_NUMBER FROM DUAL')
-                self.scn = int(cursor.fetchone()[0])
-            return self
-        except Exception as exc:
-            self.__exit__(None, None, None)
-            raise TargetStateError(f'Oracle snapshot or source lock failed ({type(exc).__name__}). '
-                                   'Check Oracle access, flashback privilege and a quiet source table.') from exc
-
-    def __exit__(self, *_exc: Any) -> None:
-        if self.connection is not None:
-            try:
-                self.connection.rollback()  # releases SHARE lock; never commit source changes
-            except Exception as exc:
-                LOG.error('Oracle source rollback failed (%s).', type(exc).__name__)
-            finally:
-                try:
-                    self.connection.close()
-                except Exception as exc:
-                    LOG.error('Oracle source connection close failed (%s).', type(exc).__name__)
-                finally:
-                    self.connection = None
-
-    def batches(self, columns: Sequence[ColumnDef]) -> Iterator[List[Tuple[Any, ...]]]:
-        if self.connection is None or self.scn is None:
-            raise TargetStateError('Oracle snapshot is not open.')
-        names = [quote_oracle_identifier(c.source_name) for c in columns]
-        table = (f"{quote_oracle_identifier(self.source['SourceSchemaName'])}."
-                 f"{quote_oracle_identifier(self.source['SourceTableName'])}")
-        query = f"SELECT {', '.join(names)} FROM {table} AS OF SCN :scn"
-        cursor = self.connection.cursor()
-        try:
-            cursor.arraysize = ORACLE_FETCH_ROWS
-            cursor.execute(query, scn=self.scn)
-            while True:
-                rows = cursor.fetchmany(ORACLE_FETCH_ROWS)
-                if not rows:
-                    break
-                yield [tuple(row) for row in rows]
-        except Exception as exc:
-            raise TargetStateError(f'Oracle snapshot read failed ({type(exc).__name__}).') from exc
-        finally:
-            cursor.close()
-
-
-def spark_type(fabric_type: str) -> Any:
-    from pyspark.sql import types as T
-    simple = {
-        'STRING': T.StringType, 'BOOLEAN': T.BooleanType, 'TINYINT': T.ByteType,
-        'SMALLINT': T.ShortType, 'INT': T.IntegerType, 'BIGINT': T.LongType,
-        'FLOAT': T.FloatType, 'DOUBLE': T.DoubleType, 'DATE': T.DateType,
-        'TIMESTAMP': T.TimestampType, 'TIMESTAMP_NTZ': T.TimestampNTZType,
-        'BINARY': T.BinaryType,
-    }
-    parts = _decimal_parts(fabric_type)
-    if parts:
-        return T.DecimalType(*parts)
-    if fabric_type in simple:
-        return simple[fabric_type]()
-    raise UnsupportedTypeError(f'No Spark conversion for {fabric_type}.')
-
-
-def convert_oracle_value(value: Any, col: ColumnDef) -> Any:
-    """Convert before createDataFrame; reject overflow and lossy decimal casts."""
-    if value is None:
-        if not col.nullable:
-            raise ValidationError(f'Oracle column {col.source_name} contains NULL but target is NOT NULL.')
-        return None
-    if hasattr(value, 'read') and callable(value.read):
-        value = value.read()  # CLOB/BLOB
-    kind = col.fabric_type
-    try:
-        if kind == 'STRING':
-            if isinstance(value, (bytes, bytearray, memoryview)):
-                raise ValueError('binary cannot be converted to string implicitly')
-            return str(value)
-        if kind == 'BINARY':
-            if not isinstance(value, (bytes, bytearray, memoryview)):
-                raise ValueError('not binary')
-            return bytes(value)
-        if kind == 'BOOLEAN':
-            if isinstance(value, bool) or value in (0, 1):
-                return bool(value)
-            raise ValueError('not boolean')
-        if kind in _INTEGRAL_ORDER:
-            integer = int(value)
-            limits = {'TINYINT': (-128, 127), 'SMALLINT': (-32768, 32767),
-                      'INT': (-2147483648, 2147483647),
-                      'BIGINT': (-9223372036854775808, 9223372036854775807)}
-            if Decimal(str(value)) != integer or not (limits[kind][0] <= integer <= limits[kind][1]):
-                raise ValueError('integer overflow or fractional value')
-            return integer
-        if kind in ('FLOAT', 'DOUBLE'):
-            import math
-            result = float(value)
-            if not math.isfinite(result):
-                raise ValueError('nonfinite float')
-            return result
-        parts = _decimal_parts(kind)
-        if parts:
-            decimal = Decimal(str(value))
-            precision, scale = parts
-            quantum = Decimal(1).scaleb(-scale)
-            with localcontext() as context:
-                context.prec = 80
-                if not decimal.is_finite():
-                    raise ValueError('decimal scale overflow')
-                quantized = decimal.quantize(quantum)
-                if decimal != quantized:
-                    raise ValueError('decimal scale overflow')
-                if len(quantized.as_tuple().digits) > precision or abs(quantized) >= Decimal(10) ** (precision - scale):
-                    raise ValueError('decimal precision overflow')
-            return quantized
-        if kind == 'DATE':
-            if isinstance(value, datetime):
-                return value.date()
-            if isinstance(value, date):
-                return value
-        if kind in ('TIMESTAMP', 'TIMESTAMP_NTZ') and isinstance(value, datetime):
-            if kind == 'TIMESTAMP' and value.tzinfo is not None:
-                return value.astimezone(timezone.utc).replace(tzinfo=None)
-            if value.tzinfo is None:
-                return value
-        raise ValueError('unsupported source value')
-    except (ValueError, TypeError, ArithmeticError, InvalidOperation) as exc:
-        raise ValidationError(f'Oracle value for {col.source_name} cannot be converted to {kind}.') from exc
-
-
-def staging_target(target: LakehouseTarget, plan_guid: str) -> LakehouseTarget:
-    return replace(target, name='MIG_STAGE_' + uuid.UUID(plan_guid).hex.upper())
-
-
-class DeltaDataMover:
-    """Load a bounded Oracle cursor into a Delta stage, validate, then merge or replace."""
-
-    def __init__(self, manager: DeltaTableManager) -> None:
-        self.manager = manager
-        self.spark = manager.spark
-
-    def stage(self, target: LakehouseTarget, columns: Sequence[ColumnDef], snapshot: OracleSnapshot) -> int:
-        from pyspark.sql import types as T
-        target.preflight(self.spark, ensure_schema=True)
-        self.spark.conf.set('spark.sql.session.timeZone', 'UTC')
-        schema = T.StructType([T.StructField(c.name, spark_type(c.fabric_type), c.nullable) for c in columns])
-        self.spark.createDataFrame([], schema).write.format('delta').mode('overwrite').option(
-            'overwriteSchema', 'true').saveAsTable(target.fq)
-        count = 0
-        for batch in snapshot.batches(columns):
-            converted = [tuple(convert_oracle_value(value, col) for value, col in zip(row, columns, strict=True))
-                         for row in batch]
-            self.spark.createDataFrame(converted, schema).write.format('delta').mode('append').saveAsTable(target.fq)
-            count += len(converted)
-        if self.spark.table(target.fq).count() != count:
-            raise TargetStateError('Staging row count differs from the Oracle snapshot.')
-        return count
-
-    def validate_keys(self, stage: LakehouseTarget, keys: Sequence[str]) -> None:
-        from functools import reduce
-        from pyspark.sql import functions as F
-        frame = self.spark.table(stage.fq)
-        cols = [F.col(quote_ident(k)) for k in keys]
-        if frame.filter(reduce(lambda a, b: a | b, (c.isNull() for c in cols))).limit(1).count():
-            raise ValidationError('Oracle snapshot has NULL merge keys.')
-        if frame.groupBy(*cols).count().filter(F.col('count') > 1).limit(1).count():
-            raise ValidationError('Oracle snapshot has duplicate merge keys.')
-
-    def validate_target_keys(self, target: LakehouseTarget, keys: Sequence[str]) -> None:
-        from functools import reduce
-        from pyspark.sql import functions as F
-        frame = self.spark.table(target.fq)
-        cols = [F.col(quote_ident(k)) for k in keys]
-        if frame.filter(reduce(lambda a, b: a | b, (c.isNull() for c in cols))).limit(1).count():
-            raise TargetStateError('Existing target contains NULL merge keys.')
-        if frame.groupBy(*cols).count().filter(F.col('count') > 1).limit(1).count():
-            raise TargetStateError('Existing target contains duplicate merge keys.')
-
-    def validate_target_subset(self, target: LakehouseTarget, stage: LakehouseTarget,
-                               keys: Sequence[str]) -> None:
-        on = ' AND '.join(f't.{quote_ident(k)} <=> s.{quote_ident(k)}' for k in keys)
-        missing = self.spark.sql(
-            f'SELECT 1 FROM {target.fq} AS t LEFT ANTI JOIN {stage.fq} AS s ON {on} LIMIT 1').count()
-        if missing:
-            raise ValidationError('Existing target has keys absent from Oracle; choose REPLACE_FULL to remove them.')
-
-    def merge(self, target: LakehouseTarget, stage: LakehouseTarget,
-              columns: Sequence[ColumnDef], keys: Sequence[str]) -> None:
-        names = [c.name for c in columns]
-        on = ' AND '.join(f't.{quote_ident(k)} <=> s.{quote_ident(k)}' for k in keys)
-        assignments = ', '.join(f't.{quote_ident(n)} = s.{quote_ident(n)}' for n in names)
-        names_sql = ', '.join(quote_ident(n) for n in names)
-        values_sql = ', '.join(f's.{quote_ident(n)}' for n in names)
-        self.spark.sql(f'MERGE INTO {target.fq} AS t USING {stage.fq} AS s ON {on} '
-                       f'WHEN MATCHED THEN UPDATE SET {assignments} '
-                       f'WHEN NOT MATCHED THEN INSERT ({names_sql}) VALUES ({values_sql})')
-
-    def replace(self, target: LakehouseTarget, stage: LakehouseTarget, columns: Sequence[ColumnDef]) -> None:
-        projection = ', '.join(quote_ident(c.name) for c in columns)
-        self.spark.sql(f'CREATE OR REPLACE TABLE {target.fq} USING DELTA AS '
-                       f'SELECT {projection} FROM {stage.fq}')
-
-    def verify_data(self, target: LakehouseTarget, stage: LakehouseTarget,
-                    columns: Sequence[ColumnDef], replace_all: bool) -> None:
-        projection = ', '.join(quote_ident(c.name) for c in columns)
-        missing = self.spark.sql(
-            f'SELECT {projection} FROM {stage.fq} EXCEPT ALL '
-            f'SELECT {projection} FROM {target.fq}').limit(1).count()
-        if missing:
-            raise TargetStateError('Target values differ from the staged Oracle snapshot.')
-        if replace_all and self.spark.table(target.fq).count() != self.spark.table(stage.fq).count():
-            raise TargetStateError('Replaced target row count differs from the Oracle snapshot.')
 
 # %% [markdown]
 # ## 8. View operations (Spark)
@@ -1751,6 +1529,10 @@ def _revise_planned(change: TargetChange, repo_factory: Callable[[], Any], mgr: 
         raise TargetStateError("REVISE_PLANNED requires an active record in PENDING status.")
     if mgr.exists(existing.target):
         raise TargetStateError("REVISE_PLANNED requires that no physical table exists yet.")
+    if change.approved_replication is not None:
+        with repo_factory() as repo:
+            check_replication_approval(change, repo.get_replication_config(existing.guid))
+            repo.assert_replication_idle(existing.guid)
     check_against_approval(compare_definitions(existing.columns, change.columns), change.approved_comparison, required=True)
     with repo_factory() as repo:
         repo.apply_metadata_change(existing.guid, "PENDING", build_column_insert_rows(change.columns, existing_rows),
@@ -1774,6 +1556,10 @@ def _alter_future(change: TargetChange, repo_factory: Callable[[], Any], mgr: De
     guid = change.existing_guid
     with repo_factory() as repo:
         config = repo.get_replication_config(guid)
+        if change.approved_replication is not None:
+            check_replication_approval(change, config)
+            check_watermark_stability(config, change.replication)
+            repo.assert_replication_idle(guid)
     original_flag = bool(config["IngestionFlag"]) if config else None
     paused = mutated = False
     try:
@@ -1785,6 +1571,9 @@ def _alter_future(change: TargetChange, repo_factory: Callable[[], Any], mgr: De
         with repo_factory() as repo:                                  # re-read AFTER the pause
             existing = repo.get_table_spec(guid)
             existing_rows = repo.get_column_rows(guid)
+            if change.approved_replication is not None:
+                repo.assert_replication_idle(guid)
+                check_replication_approval(change, repo.get_replication_config(guid))
         if existing.status != "PROVISIONED" or not existing.is_active:
             raise TargetStateError("ALTER_FUTURE requires an active PROVISIONED record.")
         if not mgr.exists(existing.target):
@@ -1795,6 +1584,8 @@ def _alter_future(change: TargetChange, repo_factory: Callable[[], Any], mgr: De
             raise TargetStateError("Physical schema differs from the recorded baseline; request a fresh review.")
 
         difference = compare_definitions(recorded, proposed)
+        if change.approved_replication is not None:
+            check_key_stability(recorded, proposed, config, change.replication)
         if any(difference.values()):                                  # metadata not yet updated
             check_against_approval(difference, change.approved_comparison, required=True)
             check_key_stability(recorded, proposed, config, change.replication)
@@ -1832,63 +1623,37 @@ def _alter_future(change: TargetChange, repo_factory: Callable[[], Any], mgr: De
         raise
 
 
-def _data_change(change: TargetChange, plan_guid: str, repo_factory: Callable[[], Any],
-                 mgr: DeltaTableManager, mover: Optional[DeltaDataMover] = None,
-                 snapshot_factory: Callable[[Dict[str, Any]], OracleSnapshot] = OracleSnapshot) -> Tuple[str, Optional[int]]:
-    """Execute an approved Oracle backfill or full replacement under a source SHARE lock."""
+def _reload_change(change: TargetChange, plan_guid: str, repo_factory: Callable[[], Any],
+                   mgr: DeltaTableManager) -> Tuple[str, Optional[int]]:
+    """Change structure and reset the watermark; the scheduled pipeline owns every source read."""
     guid = change.existing_guid
     with repo_factory() as repo:
         existing = repo.get_table_spec(guid)
         previous_rows = repo.get_column_rows(guid)
         config = repo.get_replication_config(guid)
-        source = repo.get_oracle_source(guid)
+        repo.assert_replication_idle(guid, require_state=True)
+        check_replication_approval(change, config)
     if existing.status != 'PROVISIONED' or not existing.is_active or config is None:
-        raise TargetStateError('Data movement requires an active PROVISIONED target and replication config.')
-    proposed_source = change.proposed_table
-    for key, live in (('connection_name', source['ConnectionName']),
-                      ('source_schema_name', source['SourceSchemaName']),
-                      ('source_table_name', source['SourceTableName'])):
-        if str(proposed_source.get(key) or '').upper() != str(live).upper():
-            raise ValidationError('The approved Oracle source differs from the existing target source.')
+        raise TargetStateError('Historical reload requires an active PROVISIONED target and replication config.')
     if not mgr.exists(existing.target):
-        raise TargetStateError('Data movement requires the physical target table.')
+        raise TargetStateError('Historical reload requires the physical target table.')
     physical = mgr.physical_columns(existing.target)
     if not structure_matches(physical, existing.columns):
         raise TargetStateError('Physical target schema differs from the recorded baseline.')
     difference = compare_definitions(existing.columns, change.columns)
     check_against_approval(difference, change.approved_comparison, required=True)
-    if not any(difference.values()):
+    if not any(difference.values()) and not (change.approved_replication and
+                                            change.approved_replication.get('changed')):
         raise ValidationError('The approved target change contains no column difference.')
-    current_mode = (str(config.get('IncrementalMethod') or '').upper(),
-                    str(config.get('WriteStrategy') or '').upper())
-    proposed_mode = (str(change.replication.get('incremental_method') or '').upper(),
-                     str(change.replication.get('write_strategy') or '').upper())
-    if current_mode != proposed_mode or current_mode not in {('FULL', 'REPLACE'), ('WATERMARK', 'UPSERT')}:
-        raise ValidationError('Data movement requires unchanged FULL/REPLACE or WATERMARK/UPSERT replication settings.')
-    keys: List[str] = []
-    ddl: Optional[SchemaDiff] = None
+    ddl = None
     if change.decision == PlanAction.ALTER_BACKFILL:
         check_key_stability(existing.columns, change.columns, config, change.replication)
-        raw_keys = change.replication.get('merge_key_columns') or change.replication.get('primary_key_columns')
-        keys = sorted(_json_name_set(raw_keys) or [])
-        names = {c.name.lower() for c in change.columns}
-        if not keys or any(k.lower() not in names for k in keys):
-            raise ValidationError('ALTER_BACKFILL needs a stable approved merge or primary key.')
-        if current_mode != ('WATERMARK', 'UPSERT'):
-            raise ValidationError('ALTER_BACKFILL requires existing WATERMARK/UPSERT replication.')
         ddl = plan_schema_changes(physical, change.columns)
         if ddl.rejected:
             raise UnsafeChangeError('Unsafe in-place change: ' + '; '.join(ddl.rejected))
-    else:
-        if change.decision != PlanAction.REPLACE_FULL:
-            raise ValidationError('Unknown data change decision.')
-    for col in change.columns:
-        validate_oracle_identifier(col.source_name, 'Oracle column')
-        if col.source_expression:
-            raise ValidationError('Data movement does not support source expressions; approve plain Oracle columns.')
+    elif change.decision != PlanAction.REPLACE_FULL:
+        raise ValidationError('Unknown historical reload decision.')
 
-    stage = staging_target(existing.target, plan_guid)
-    mover = mover or DeltaDataMover(mgr)
     original_flag = bool(config['IngestionFlag'])
     paused = mutation_started = False
     try:
@@ -1897,48 +1662,36 @@ def _data_change(change: TargetChange, plan_guid: str, repo_factory: Callable[[]
                 repo.set_ingestion_flag(guid, False)
             paused = True
         with repo_factory() as repo:
-            repo.assert_replication_idle(guid)
-            repo.begin_change_run(plan_guid, guid, change.decision, stage.name)
-        with snapshot_factory(source) as snapshot:
-            rows = mover.stage(stage, change.columns, snapshot)
-            if keys:
-                mover.validate_keys(stage, keys)
-                mover.validate_target_keys(existing.target, keys)
-                mover.validate_target_subset(existing.target, stage, keys)
-            with repo_factory() as repo:
-                repo.mark_change_run(plan_guid, 'STAGED', snapshot_scn=snapshot.scn, source_rows=rows)
-                # Mark before the first physical mutation. An uncertain retry then stops for reconciliation.
-                repo.mark_change_run(plan_guid, 'MUTATION_STARTED')
-            mutation_started = True
-            target_spec = replace(existing, columns=tuple(change.columns))
-            if change.decision == PlanAction.ALTER_BACKFILL:
-                if ddl and not ddl.is_empty:
-                    mgr.apply(target_spec, ddl)
-                mgr.verify(target_spec)
-                mover.merge(existing.target, stage, change.columns, keys)
-                mgr.verify(target_spec)
-                mover.verify_data(existing.target, stage, change.columns, replace_all=False)
-            else:
-                mover.replace(existing.target, stage, change.columns)
-                mgr.verify(target_spec)
-                mover.verify_data(existing.target, stage, change.columns, replace_all=True)
-            with repo_factory() as repo:
-                repo.apply_metadata_change(
-                    guid, 'PROVISIONED', build_column_insert_rows(change.columns, previous_rows),
-                    replication_updates(change.replication), complete_run_guid=plan_guid,
-                    resume_ingestion=original_flag)
-        message = (f'{change.decision} completed from a locked Oracle snapshot; {rows} rows staged; '
-                   'previous watermark retained for safe replay')
+            repo.assert_replication_idle(guid, require_state=True)
+            check_replication_approval(change, repo.get_replication_config(guid))
+            # StageTableName is a legacy NOT NULL audit field. No staging table is created.
+            repo.begin_change_run(plan_guid, guid, change.decision, '')
+            repo.mark_change_run(plan_guid, 'MUTATION_STARTED')
+        mutation_started = True
+        target_spec = replace(existing, columns=tuple(change.columns))
+        if change.decision == PlanAction.ALTER_BACKFILL:
+            if ddl and not ddl.is_empty:
+                mgr.apply(target_spec, ddl)
+        else:
+            mgr.replace_empty(target_spec)
+        mgr.verify(target_spec)
+        with repo_factory() as repo:
+            repo.apply_metadata_change(
+                guid, 'PROVISIONED', build_column_insert_rows(change.columns, previous_rows),
+                replication_updates(change.replication), complete_run_guid=plan_guid,
+                resume_ingestion=original_flag, reset_watermark=True)
+        message = (f'{change.decision}: structure updated; watermark reset to NULL; '
+                   'historical data loading is delegated to the scheduled replication pipeline')
         if not original_flag:
             message += '; ingestion remains paused'
-        return message, rows
+        return message, 0
     except Exception as exc:
         if paused and not mutation_started:
             try:
                 with repo_factory() as repo:
                     repo.set_ingestion_flag(guid, True)
             except Exception:
-                LOG.error('Could not restore ingestion after a failed data-change preflight.')
+                LOG.error('Could not restore ingestion after a failed reload preflight.')
         if mutation_started:
             raise TargetStateError(f'{safe_message(exc)}; target may have changed; ingestion left paused '
                                    'for reconciliation') from exc
@@ -1953,8 +1706,8 @@ def run_table_change(plan_guid: str, decision: str, run_id: str = "",
     Execute the approved decision of a CHANGE_REQUESTED plan against the EXISTING target.
 
     The decision, the target and the proposed definition are read from the plan's Notes (the
-    ``decision`` argument is only cross-checked). The Oracle data-movement branches
-    require an active source connection and the TargetChangeRuns audit table.
+    ``decision`` argument is only cross-checked). Historical reload branches only change
+    structure and reset replication state; they require the TargetChangeRuns audit table.
     """
     name_ref = {"name": str(plan_guid)}
 
@@ -1978,7 +1731,7 @@ def run_table_change(plan_guid: str, decision: str, run_id: str = "",
             if change.decision == PlanAction.REVISE_PLANNED:
                 return _revise_planned(change, repo_factory, mgr)
             if change.decision in (PlanAction.ALTER_BACKFILL, PlanAction.REPLACE_FULL):
-                return _data_change(change, plan_guid, repo_factory, mgr)
+                return _reload_change(change, plan_guid, repo_factory, mgr)
             return _alter_future(change, repo_factory, mgr)
 
     return run_timed(ObjectType.TABLE, name_ref, action)
@@ -3163,133 +2916,135 @@ def run_self_tests(verbosity: int = 2) -> Dict[str, Any]:
                 g.verify_target_agreement(self.change, other)
 
 
-    class DataMovementTests(unittest.TestCase):
-        def setUp(self):
+    class ReloadStateTests(unittest.TestCase):
+        def make(self, decision, ingestion=True):
             data = json.loads(REAL_NOTES)
-            self.data = data
-            self.live = RealPayloadTests.LIVE
-            self.base = g.parse_target_change(REAL_NOTES)
-            self.recorded = [c for c in self.base.columns if c.name != 'CUSTOMER_REGION']
-            self.physical = [phys(c.name, c.fabric_type, c.nullable) for c in self.recorded]
-
-        def make(self, decision):
-            data = json.loads(json.dumps(self.data))
             data['target_change']['decision'] = decision
             change = g.parse_target_change(json.dumps(data))
-            parent = self
+            recorded = [c for c in change.columns if c.name != 'CUSTOMER_REGION']
 
             class Repo(ChangeRepo):
                 def __init__(self):
-                    super().__init__(json.dumps(data), parent.recorded, target=parent.live)
-                    self.pk = '["ORDER_ID"]'
-                    self.phase = None
+                    super().__init__(json.dumps(data), recorded, target=RealPayloadTests.LIVE,
+                                     ingestion=ingestion)
+                    self.pk, self.phase = '["ORDER_ID"]', None
+                    self.watermark, self.state_status = '2026-10-01', 'SUCCEEDED'
+                    self.reset_requested, self.missing_state = False, False
                 def get_oracle_source(self, _):
-                    return {'ConnectionName': 'Oracle Local', 'SourceSchemaName': 'ONT',
-                            'SourceTableName': 'SALES_ORDER_HEADER'}
-                def assert_replication_idle(self, _): pass
-                def begin_change_run(self, *_):
+                    raise AssertionError('Notebook must never read Oracle credentials or rows')
+                def assert_replication_idle(self, _, require_state=False):
+                    if self.state_status == 'RUNNING' or (require_state and self.missing_state):
+                        raise g.TargetStateError('Replication state missing or running')
+                def begin_change_run(self, _, guid, action, stage_name):
                     if self.phase in ('MUTATION_STARTED', 'COMPLETED'):
                         raise g.TargetStateError('Prior mutation requires reconciliation.')
+                    self.assert_no_stage = stage_name == ''
                     self.phase = 'STARTED'
-                def mark_change_run(self, _, phase, **kw): self.phase = phase
+                def mark_change_run(self, _, phase): self.phase = phase
                 def apply_metadata_change(self, guid, status, rows, updates, complete_run_guid=None,
-                                          resume_ingestion=None):
-                    if self.fail_apply: raise g.TargetStateError('db down')
+                                          resume_ingestion=None, reset_watermark=False):
                     super().apply_metadata_change(guid, status, rows, updates)
-                    self.phase = 'COMPLETED'
-                    self.ingestion = resume_ingestion
+                    self.reset_requested = reset_watermark
+                    if reset_watermark:
+                        self.watermark, self.state_status = None, 'NOT_STARTED'
+                    self.phase, self.ingestion = 'COMPLETED', resume_ingestion
 
-            class Snapshot:
-                scn = 42
-                def __init__(self, _): pass
-                def __enter__(self): return self
-                def __exit__(self, *_): pass
+            class Manager(FakeMgr):
+                def __init__(self):
+                    super().__init__([phys(c.name, c.fabric_type, c.nullable) for c in recorded])
+                    self.replaced = False
+                def replace_empty(self, spec):
+                    self.replaced = True
+                    self.physical = [phys(c.name, c.fabric_type, c.nullable) for c in spec.columns]
 
-            class Mover:
-                def __init__(self, mgr):
-                    self.mgr, self.calls, self.fail_verify = mgr, [], False
-                def stage(self, *_): self.calls.append('stage'); return 12
-                def validate_keys(self, *_): self.calls.append('keys')
-                def validate_target_keys(self, *_): self.calls.append('target_keys')
-                def validate_target_subset(self, *_): self.calls.append('target_subset')
-                def merge(self, *_): self.calls.append('merge')
-                def replace(self, target, stage, columns):
-                    self.calls.append('replace')
-                    self.mgr.physical = [phys(c.name, c.fabric_type, c.nullable) for c in columns]
-                def verify_data(self, *_ , **__):
-                    self.calls.append('verify_data')
-                    if self.fail_verify: raise g.TargetStateError('values differ')
+            return change, Repo(), Manager()
 
-            repo = Repo()
-            manager = FakeMgr(self.physical)
-            mover = Mover(manager)
-            return change, repo, manager, mover, Snapshot
+        def run_change(self, change, repo, manager):
+            return g.run_table_change(P, change.decision, '', factory(repo), manager, Lease)
 
-        def run_change(self, decision, repo, manager, mover, snapshot):
-            return g._data_change(decision, P, factory(repo), manager, mover, snapshot)
-
-        def test_backfill_merges_and_commits_after_verification(self):
-            change, repo, manager, mover, snapshot = self.make('ALTER_BACKFILL')
-            message, rows = self.run_change(change, repo, manager, mover, snapshot)
-            self.assertEqual(rows, 12)
+        def test_backfill_alters_and_resets_without_source_access(self):
+            change, repo, manager = self.make('ALTER_BACKFILL')
+            result = self.run_change(change, repo, manager)
+            self.assertEqual((result.status, result.rows_written), ('SUCCESS', 0), result.message)
+            self.assertIsNotNone(manager.applied)
+            self.assertFalse(manager.replaced)
+            self.assertEqual((repo.watermark, repo.state_status), (None, 'NOT_STARTED'))
+            self.assertTrue(repo.reset_requested and repo.ingestion and repo.assert_no_stage)
             self.assertEqual(repo.phase, 'COMPLETED')
-            self.assertTrue(repo.ingestion)
-            self.assertEqual(mover.calls, ['stage', 'keys', 'target_keys', 'target_subset', 'merge', 'verify_data'])
-            self.assertIn('previous watermark retained', message)
 
-        def test_replace_uses_staging_and_commits(self):
-            change, repo, manager, mover, snapshot = self.make('REPLACE_FULL')
-            message, rows = self.run_change(change, repo, manager, mover, snapshot)
-            self.assertEqual((rows, repo.phase), (12, 'COMPLETED'))
-            self.assertEqual(mover.calls, ['stage', 'replace', 'verify_data'])
+        def test_replace_creates_empty_structure_and_resets(self):
+            change, repo, manager = self.make('REPLACE_FULL')
+            result = self.run_change(change, repo, manager)
+            self.assertEqual((result.status, result.rows_written), ('SUCCESS', 0), result.message)
+            self.assertTrue(manager.replaced)
+            self.assertIsNone(manager.applied)
+            self.assertEqual((repo.watermark, repo.state_status), (None, 'NOT_STARTED'))
+            self.assertEqual(repo.phase, 'COMPLETED')
 
-        def test_failure_after_target_write_stays_paused_and_blocks_retry(self):
-            change, repo, manager, mover, snapshot = self.make('REPLACE_FULL')
-            mover.fail_verify = True
-            with self.assertRaisesRegex(g.TargetStateError, 'ingestion left paused'):
-                self.run_change(change, repo, manager, mover, snapshot)
-            self.assertEqual(repo.phase, 'MUTATION_STARTED')
+        def test_original_pause_is_preserved(self):
+            change, repo, manager = self.make('ALTER_BACKFILL', ingestion=False)
+            self.assertEqual(self.run_change(change, repo, manager).status, 'SUCCESS')
             self.assertFalse(repo.ingestion)
-            with self.assertRaises(g.TargetStateError):
-                self.run_change(change, repo, manager, mover, snapshot)
+            self.assertIsNone(repo.watermark)
 
-        def test_unsafe_backfill_fails_before_pause(self):
-            change, repo, manager, mover, snapshot = self.make('ALTER_BACKFILL')
-            repo.pk = None
-            with self.assertRaises(g.UnsafeChangeError):
-                self.run_change(change, repo, manager, mover, snapshot)
-            self.assertTrue(repo.ingestion)
-            self.assertEqual(mover.calls, [])
+        def test_running_or_missing_state_rejects_before_ddl(self):
+            for missing in (False, True):
+                change, repo, manager = self.make('REPLACE_FULL')
+                repo.missing_state = missing
+                repo.state_status = 'SUCCEEDED' if missing else 'RUNNING'
+                self.assertEqual(self.run_change(change, repo, manager).status, 'FAILED')
+                self.assertFalse(manager.replaced)
+                self.assertEqual(repo.watermark, '2026-10-01')
 
-        def test_decimal_casts_are_exact(self):
-            c = col('AMOUNT', 'DECIMAL(38,2)')
-            self.assertEqual(g.convert_oracle_value(Decimal('123.4500'), c), Decimal('123.45'))
-            with self.assertRaises(g.ValidationError):
-                g.convert_oracle_value(Decimal('123.456'), c)
-            with self.assertRaises(g.ValidationError):
-                g.convert_oracle_value(Decimal('1E+38'), c)
+        def test_commit_failure_preserves_watermark_and_leaves_ingestion_paused(self):
+            change, repo, manager = self.make('REPLACE_FULL')
+            repo.fail_apply = True
+            result = self.run_change(change, repo, manager)
+            self.assertEqual(result.status, 'FAILED')
+            self.assertTrue(manager.replaced)
+            self.assertFalse(repo.ingestion)
+            self.assertEqual(repo.watermark, '2026-10-01')
+            self.assertEqual(repo.phase, 'MUTATION_STARTED')
+            self.assertEqual(self.run_change(change, repo, manager).status, 'FAILED')
 
-        def test_oracle_connection_and_identifiers(self):
-            source = {'ConnectionDetails': json.dumps({'host': 'db.example', 'port': 1521,
-                                                       'serviceName': 'service', 'username': 'u', 'password': 'secret'})}
-            self.assertEqual(g.parse_oracle_connection(source), ('u', 'secret', 'db.example:1521/service'))
-            with self.assertRaises(g.ValidationError):
-                g.quote_oracle_identifier('T; DROP TABLE X')
-            with self.assertRaises(g.ValidationError):
-                g.parse_oracle_connection({'ConnectionDetails': '{}'})
+        def test_future_alter_preserves_watermark(self):
+            change, repo, manager = self.make('ALTER_FUTURE')
+            self.assertEqual(self.run_change(change, repo, manager).status, 'SUCCESS')
+            self.assertEqual(repo.watermark, '2026-10-01')
+            self.assertFalse(repo.reset_requested)
 
-        def test_data_sql_uses_staging_and_quoted_keys(self):
+        def test_watermark_only_change_resets_without_altering_columns(self):
+            change, repo, manager = self.make('ALTER_BACKFILL')
+            recorded = repo.get_table_spec(change.existing_guid).columns
+            change = replace(change, columns=recorded,
+                approved_comparison={'same': True, 'added': [], 'removed': [], 'changed': []},
+                approved_replication={'before': {'incremental_method': 'WATERMARK'},
+                                      'changed': [{'name': 'watermark_column'}]})
+            repo.notes_text = json.dumps({'target_change': {
+                'decision': change.decision, 'existing_source_table_guid': change.existing_guid,
+                'review': {'target': change.review_target, 'definitions': [{
+                    'source_table_guid': change.existing_guid, 'comparison': change.approved_comparison,
+                    'replication_comparison': change.approved_replication}]},
+                'proposed_plan': {'table': change.proposed_table, 'replication': change.replication,
+                    'columns': [{'sno': c.sno, 'column_name': c.name, 'fabric_data_type': c.fabric_type,
+                                 'is_primary_key': c.is_primary_key, 'is_nullable': c.nullable}
+                                for c in recorded]}}})
+            result = self.run_change(change, repo, manager)
+            self.assertEqual(result.status, 'SUCCESS', result.message)
+            self.assertIsNone(manager.applied)
+            self.assertFalse(manager.replaced)
+            self.assertTrue(repo.reset_requested)
+
+        def test_replacement_ddl_has_no_source_select(self):
             statements = []
-            spark = types.SimpleNamespace(sql=lambda statement: statements.append(statement))
-            mover = g.DeltaDataMover(types.SimpleNamespace(spark=spark))
-            stage = g.staging_target(self.live, P)
-            mover.merge(self.live, stage, self.base.columns, ['order_id'])
-            mover.replace(self.live, stage, self.base.columns)
-            self.assertIn('MERGE INTO', statements[0])
-            self.assertIn('t.`order_id` <=> s.`order_id`', statements[0])
-            self.assertIn(stage.fq, statements[0])
-            self.assertTrue(statements[1].startswith('CREATE OR REPLACE TABLE'))
-            self.assertNotIn('DROP TABLE', ''.join(statements))
+            class Target:
+                fq = '`S`.`T`'
+                def preflight(self, *_ , **__): pass
+            manager = g.DeltaTableManager(types.SimpleNamespace(sql=statements.append))
+            spec = g.TableSpec(T1, P, 'PROVISIONED', True, Target(), tuple(REC))
+            manager.replace_empty(spec)
+            self.assertTrue(statements[0].startswith('CREATE OR REPLACE TABLE'))
+            self.assertNotIn('SELECT', statements[0])
 
     classes = sorted((c for name, c in list(locals().items())
                       if isinstance(c, type) and issubclass(c, unittest.TestCase) and name.endswith("Tests")),

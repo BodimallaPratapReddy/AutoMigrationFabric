@@ -7,7 +7,7 @@ import pytest
 from pydantic import ValidationError
 from temporalio import activity
 from temporalio.testing import WorkflowEnvironment
-from temporalio.worker import Worker
+from temporalio.worker import Worker, Replayer
 
 from app.migration.contracts import MigrationInput
 from app.migration.workflows import (
@@ -49,7 +49,8 @@ def test_fabric_ids_reject_names_before_starting_workflow(field):
 
 
 async def _exercise_plan_only(watermark: str | None = None, *, indexed: bool = True,
-                              edit_again: bool = False) -> None:
+                              edit_again: bool = False, missing_key: bool = False,
+                              manual_key: bool = True, delete_policy: dict | None = None) -> None:
     calls = []
     persisted = []
     guid = str(uuid4())
@@ -69,7 +70,7 @@ async def _exercise_plan_only(watermark: str | None = None, *, indexed: bool = T
         respond("validate_fabric", {"lakehouse_name": "Bronze"}),
         respond("discover_oracle", {"table_plan": {"table": {}, "columns": [
                          {"column_name": "ORDER_ID", "fabric_data_type": "STRING"}],
-                         "replication": {"primary_key_columns": ["ORDER_ID"],
+                         "replication": {"primary_key_columns": None if missing_key else ["ORDER_ID"],
                                          "incremental_method": "FULL",
                                          "watermark_column": None,
                                          "watermark_column_data_type": None,
@@ -82,6 +83,8 @@ async def _exercise_plan_only(watermark: str | None = None, *, indexed: bool = T
                                  "index_details": ([{"index_name": "IX_UPDATED", "column_position": 1}]
                                                    if indexed else [])}]}}),
         respond("transition_plan"), respond("approve_runtime_plan"),
+        respond("validate_oracle_key", {"valid": True, "status": "CHECKED", "columns": ["ORDER_ID"],
+                                       "scope": "FULL_TABLE", "has_nulls": False, "has_duplicates": False}),
         respond("review_existing_target", {"definitions": []}),
         _activity("persist_runtime_plan", persist),
         respond("submit_provisioning"), respond("submit_replication"),
@@ -97,6 +100,11 @@ async def _exercise_plan_only(watermark: str | None = None, *, indexed: bool = T
             await _wait_for_phase(handle, "WAITING_FOR_COLUMN_MAPPING_APPROVAL")
             await handle.signal("command", {"action": "approve_columns", "actor": "reviewer",
                                             "columns": [{"name": "ORDER_ID", "fabric_type": "DECIMAL(18,0)"}]})
+            if missing_key:
+                await _wait_for_phase(handle, "WAITING_FOR_PRIMARY_KEY_APPROVAL")
+                assert persisted == []
+                await handle.signal("command", {"action": "approve_primary_key", "actor": "reviewer",
+                    "primary_key_columns": ["ORDER_ID"] if manual_key else []})
             await _wait_for_phase(handle, "WAITING_FOR_WATERMARK_APPROVAL")
             assert persisted == []
             if edit_again:
@@ -108,7 +116,23 @@ async def _exercise_plan_only(watermark: str | None = None, *, indexed: bool = T
                 assert persisted == []
             await handle.signal("command", {"action": "approve_watermark", "actor": "reviewer",
                                             "watermark_column": watermark})
+            await _wait_for_phase(handle, "WAITING_FOR_DELETE_POLICY_APPROVAL")
+            assert persisted == []
+            await handle.signal("command", {"action": "approve_delete_policy", "actor": "reviewer",
+                                            "delete_policy": delete_policy or {"mode": "NONE"}})
             result = await handle.result()
+            assert persisted[0]["tables"][0]["replication"]["delete_policy"]["mode"] == (
+                delete_policy or {"mode": "NONE"})["mode"]
+            if delete_policy:
+                assert persisted[0]["tables"][0]["replication"]["key_validation"]["valid"] is True
+                await Replayer(workflows=[OracleTableMigrationWorkflow]).replay_workflow(await handle.fetch_history())
+            if missing_key:
+                assert result["review"]["primary_key_source"] == ("USER" if manual_key else "NONE")
+                table = persisted[0]["tables"][0]
+                assert table["replication"]["primary_key_columns"] == (["ORDER_ID"] if manual_key else None)
+                assert table["columns"][0]["is_primary_key"] is manual_key
+                await Replayer(workflows=[OracleTableMigrationWorkflow]).replay_workflow(
+                    await handle.fetch_history())
             assert result["status"] == "PLANNED"
             assert result["phase"] == "READY_TO_PROVISION"
             assert "persist_runtime_plan" in calls
@@ -133,6 +157,19 @@ async def _exercise_plan_only(watermark: str | None = None, *, indexed: bool = T
 
 def test_plan_only_skips_fabric_jobs():
     asyncio.run(_exercise_plan_only())
+
+
+def test_reconciliation_configuration_is_persisted_without_loading_and_replays():
+    asyncio.run(_exercise_plan_only("LAST_UPDATED_DATE", delete_policy={
+        "mode": "RECONCILE", "behavior": "MARK", "reconcile_interval_minutes": 1440}))
+
+
+def test_manual_primary_key_is_persisted_and_history_replays():
+    asyncio.run(_exercise_plan_only("LAST_UPDATED_DATE", missing_key=True))
+
+
+def test_explicit_no_primary_key_is_persisted_as_full_load():
+    asyncio.run(_exercise_plan_only(missing_key=True, manual_key=False))
 
 
 def test_oracle_watermark_choice_is_persisted_with_index():
@@ -227,16 +264,33 @@ async def _exercise_standard(action: str, workflow_class=OracleTableMigrationWor
             if oracle and action in {"approve_plan", "cancel_running"}:
                 await handle.signal("command", {"action": "approve_columns", "actor": "reviewer",
                                                 "columns": [{"name": "ORDER_ID", "fabric_type": "BIGINT"}]})
+                await _wait_for_phase(handle, "WAITING_FOR_PRIMARY_KEY_APPROVAL")
+                await handle.signal("command", {"action": "approve_primary_key", "actor": "reviewer",
+                                                "primary_key_columns": []})
+                await _wait_for_phase(handle, "WAITING_FOR_WATERMARK_APPROVAL")
+            if approach == "SAP_TABLE" and action in {"approve_plan", "cancel_running"}:
+                await handle.signal("command", {"action": "approve_plan", "actor": "reviewer"})
+                await _wait_for_phase(handle, "WAITING_FOR_PRIMARY_KEY_APPROVAL")
+                await handle.signal("command", {"action": "approve_primary_key", "actor": "reviewer",
+                                                "primary_key_columns": []})
                 await _wait_for_phase(handle, "WAITING_FOR_WATERMARK_APPROVAL")
             if action == "cancel_running":
-                await handle.signal("command", {"action": "approve_watermark" if oracle else "approve_plan",
+                await handle.signal("command", {"action": "approve_watermark" if oracle or approach == "SAP_TABLE" else "approve_plan",
                                                 "actor": "reviewer", "watermark_column": None})
+                if oracle:
+                    await _wait_for_phase(handle, "WAITING_FOR_DELETE_POLICY_APPROVAL")
+                    await handle.signal("command", {"action": "approve_delete_policy", "actor": "reviewer",
+                                                    "delete_policy": {"mode": "NONE"}})
                 await _wait_for_phase(handle, "WAITING_FOR_PROVISIONING")
             selected_action = ("cancel" if action == "cancel_running" else
                                "reject_columns" if oracle and action == "reject_plan" else
-                               "approve_watermark" if oracle and action == "approve_plan" else action)
+                               "approve_watermark" if (oracle or approach == "SAP_TABLE") and action == "approve_plan" else action)
             await handle.signal("command", {"action": selected_action,
                                             "actor": "reviewer"})
+            if oracle and action == "approve_plan":
+                await _wait_for_phase(handle, "WAITING_FOR_DELETE_POLICY_APPROVAL")
+                await handle.signal("command", {"action": "approve_delete_policy", "actor": "reviewer",
+                                                "delete_policy": {"mode": "NONE"}})
             result = await handle.result()
             expected = {"approve_plan": "COMPLETED", "reject_plan": "REJECTED",
                         "cancel": "CANCELLED", "cancel_running": "CANCELLED"}[action]

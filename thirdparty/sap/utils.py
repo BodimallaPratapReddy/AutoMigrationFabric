@@ -30,6 +30,13 @@ class SAPFieldMetadata(BaseModel):
     ddtext: str
 
 
+def is_sap_watermark_field(field: SAPFieldMetadata) -> bool:
+    """A time of day alone cannot order changes across successive days."""
+    return (field.datatype.upper() in {"DATS", "DATE", "UTCLONG", "TIMESTAMP"}
+            or (field.datatype.upper() == "DEC"
+                and field.rollname.upper() in {"TIMESTAMP", "TIMESTAMPL", "TZNTSTMPS", "TZNTSTMPL"}))
+
+
 class SAPSQLQueryResponse(BaseModel):
     success: bool
     rows: list[dict[str, JsonValue]]
@@ -480,10 +487,13 @@ class SAPClient:
         candidates = []
         for field in self.get_table_schema(table_name).columns:
             kind = field.datatype.upper()
-            if kind in {"DATS", "TIMS", "UTCLONG", "TIMESTAMP"}:
+            if is_sap_watermark_field(field):
                 candidates.append(SAPWatermarkCandidate(
-                    field_name=field.fieldname, datatype=kind,
-                    reason="Date, time, or timestamp-compatible SAP type"))
+                    field_name=field.fieldname,
+                    datatype=f"DEC({field.leng},{field.decimals})" if kind == "DEC" else kind,
+                    reason=("SAP date (YYYYMMDD); select only if it tracks changes; same-day changes require an overlap window"
+                            if kind in {"DATS", "DATE"} else
+                            "SAP timestamp; select only if it tracks changes")))
         return candidates
 
     def get_datasource_fields(self, datasource_name: str) -> list[SAPDatasourceField]:

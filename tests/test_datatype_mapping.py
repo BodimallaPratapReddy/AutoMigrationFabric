@@ -170,5 +170,23 @@ class TypeMappingTests(unittest.TestCase):
         self.assertEqual(mapped("RAW"), "VARBINARY(13)")
         self.assertEqual(mapped("STRING"), "VARCHAR(MAX)")
         self.assertEqual(mapped("DATS"), "VARCHAR(8)")
-        self.assertEqual(mapped("TIMS"), "TIME")
+        self.assertEqual(mapped("TIMS"), "VARCHAR(6)")
         self.assertEqual(mapped("FLTP"), "FLOAT")
+
+    def test_sap_client_and_time_have_explicit_text_mappings(self) -> None:
+        for name, datatype, length, target in [
+            ("MANDT", "CLNT", 3, "VARCHAR(3)"),
+            ("ABHOV", "TIMS", 6, "VARCHAR(6)"),
+        ]:
+            with self.subTest(datatype=datatype):
+                field = SAPFieldMetadata(
+                    fieldname=name, datatype=datatype, position=1,
+                    keyflag="", rollname="", leng=length, decimals=0,
+                    checktable="", reftable="", reffield="", ddtext="",
+                )
+                mapping = map_sap_field(field)
+                self.assertEqual(mapping.source_type, f"{datatype}({length},0)")
+                self.assertEqual(mapping.fabric_type, target)
+                self.assertTrue(mapping.supported)
+                self.assertFalse(mapping.lossy)
+                self.assertIsNone(mapping.warning)

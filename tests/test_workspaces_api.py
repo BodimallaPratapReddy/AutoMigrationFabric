@@ -1,4 +1,5 @@
 from types import SimpleNamespace
+import time
 
 from fastapi.testclient import TestClient
 
@@ -54,3 +55,42 @@ def test_lakehouses_are_listed_only_for_an_active_workspace(monkeypatch):
         {"lakehouse_name": "Silver", "lakehouse_id": "00000000-0000-0000-0000-000000000002"},
     ]
     assert client.get("/workspaces/00000000-0000-0000-0000-000000000001/lakehouses").status_code == 404
+
+
+def test_lakehouse_request_times_out_while_registry_is_stalled(monkeypatch):
+    class StalledDB:
+        def list_fabric_workspaces(self, **kwargs):
+            time.sleep(0.1)
+            return []
+
+    monkeypatch.setattr(workspaces_api, "ConfigDB", StalledDB)
+    monkeypatch.setattr(workspaces_api, "LAKEHOUSE_REQUEST_TIMEOUT", 0.01, raising=False)
+    response = TestClient(app).get(
+        "/workspaces/5a590541-0088-465b-b8a3-d7609f270a5f/lakehouses")
+    assert response.status_code == 504
+    assert "timed out" in response.json()["detail"]
+
+
+def test_lakehouse_request_times_out_while_fabric_is_stalled(monkeypatch):
+    workspace_id = "5a590541-0088-465b-b8a3-d7609f270a5f"
+
+    class FakeDB:
+        def list_fabric_workspaces(self, **kwargs):
+            return [SimpleNamespace(workspace_id=workspace_id)]
+
+    class StalledFabric:
+        def __enter__(self):
+            time.sleep(0.1)
+            return self
+
+        def __exit__(self, *_):
+            pass
+
+        def list_lakehouses(self, _):
+            return []
+
+    monkeypatch.setattr(workspaces_api, "ConfigDB", FakeDB)
+    monkeypatch.setattr(workspaces_api, "FabricClient", StalledFabric)
+    monkeypatch.setattr(workspaces_api, "LAKEHOUSE_REQUEST_TIMEOUT", 0.01, raising=False)
+    response = TestClient(app).get(f"/workspaces/{workspace_id}/lakehouses")
+    assert response.status_code == 504

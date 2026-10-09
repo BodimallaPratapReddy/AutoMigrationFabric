@@ -1,0 +1,7 @@
+archive/
+wsl/
+tests/
+**/.env
+**/.env.*
+**/__pycache__/
+**/*.log

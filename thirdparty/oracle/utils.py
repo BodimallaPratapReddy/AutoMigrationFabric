@@ -81,6 +81,7 @@ class OracleIndexDefinition(BaseModel):
     uniqueness: str
     index_type: str
     columns: list[OracleKeyColumn]
+    status: str | None = None
 
 
 class OracleWatermarkCandidate(BaseModel):
@@ -395,12 +396,49 @@ class OracleClient:
         keys = self._keys(schema_name, table_name, "P")
         return keys[0] if keys else None
 
+    def validate_replication_key(self, schema_name: str, table_name: str,
+                                 columns: list[str]) -> dict:
+        """Exact existence checks in one read-only snapshot; no source values returned."""
+        schema = _identifier(schema_name, "schema_name")
+        table = _identifier(table_name, "table_name")
+        if not columns or len(set(columns)) != len(columns):
+            raise ValueError("Select distinct key fields")
+        names = [_identifier(name, "key column") for name in columns]
+        metadata = {column.column_name: column for column in self.get_table_schema(schema, table)}
+        if any(name not in metadata for name in names):
+            raise ValueError("Key fields must exist in the source table")
+        if any((metadata[name].data_type or metadata[name].datatype).upper().startswith(
+                ("CLOB", "NCLOB", "BLOB", "LONG", "XMLTYPE", "BFILE")) for name in names):
+            raise ValueError("LOB and complex fields cannot be replication keys")
+        quoted = [f'"{name}"' for name in names]
+        source = f'"{schema}"."{table}"'
+        connection = self.connect()
+        try:
+            connection.call_timeout = 120000
+            with connection.cursor() as cursor:
+                cursor.execute("SET TRANSACTION READ ONLY")
+                cursor.execute(f"SELECT 1 FROM {source} WHERE (" +
+                               " OR ".join(f"{name} IS NULL" for name in quoted) + ") AND ROWNUM = 1")
+                has_nulls = cursor.fetchone() is not None
+                cursor.execute("SELECT 1 FROM (SELECT " + ", ".join(quoted) +
+                               f" FROM {source} GROUP BY " + ", ".join(quoted) +
+                               " HAVING COUNT(*) > 1) WHERE ROWNUM = 1")
+                has_duplicates = cursor.fetchone() is not None
+            return {"valid": not has_nulls and not has_duplicates, "status": "CHECKED",
+                    "columns": names, "has_nulls": has_nulls, "has_duplicates": has_duplicates,
+                    "checked_at": datetime.now().astimezone().isoformat(), "scope": "FULL_TABLE"}
+        finally:
+            try:
+                connection.rollback()
+            finally:
+                connection.close()
+
     def get_unique_keys(self, schema_name: str, table_name: str) -> list[OracleKey]:
         return self._keys(schema_name, table_name, "U")
 
     def get_indexes(self, schema_name: str, table_name: str) -> list[OracleIndexDefinition]:
         rows = _records(self.execute_sql(
-            "SELECT i.index_name, i.uniqueness, i.index_type, "
+            "SELECT i.index_name, i.uniqueness, i.index_type, i.status, "
             "ic.column_name, ic.column_position "
             "FROM all_indexes i JOIN all_ind_columns ic "
             "ON i.owner = ic.index_owner AND i.index_name = ic.index_name "
@@ -416,7 +454,7 @@ class OracleClient:
             if name not in grouped:
                 grouped[name] = OracleIndexDefinition(
                     index_name=name, uniqueness=str(row["UNIQUENESS"]),
-                    index_type=str(row["INDEX_TYPE"]), columns=[])
+                    index_type=str(row["INDEX_TYPE"]), status=row.get("STATUS"), columns=[])
             grouped[name].columns.append(OracleKeyColumn(
                 name=str(row["COLUMN_NAME"]), position=int(row["COLUMN_POSITION"])))
         return list(grouped.values())

@@ -1,0 +1,38 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "servers": {
+      "sap": {
+        "type": "local",
+        "codemode": false,
+        "command": [
+          "/home/pratap/.nvm/versions/node/v22.19.0/bin/node",
+          "/home/pratap/.local/share/abap-mcp/native/node_modules/abap-adt-mcp/dist/index.js"
+        ],
+        "environment": {
+          "SAP_SYSTEMS_FILE": "/home/pratap/.config/opencode/systems.sap.json",
+          "MCP_READ_ONLY": "1",
+          "MCP_TOOLSETS": "source,objects,data",
+          "MCP_MAX_RESPONSE_CHARS": "12000"
+        },
+        "timeout": {
+          "startup": 30000,
+          "catalog": 30000,
+          "execution": 120000
+        }
+      }
+    }
+  },
+  "permissions": [
+    {
+      "action": "sap_tableContents",
+      "resource": "*",
+      "effect": "ask"
+    },
+    {
+      "action": "sap_runQuery",
+      "resource": "*",
+      "effect": "ask"
+    }
+  ]
+}

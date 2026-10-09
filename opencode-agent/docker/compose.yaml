@@ -1,0 +1,47 @@
+name: opencode-adt-docker
+services:
+  opencode:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+      args:
+        OPENCODE_VERSION: "2.0.23"
+        ABAP_MCP_VERSION: "2.7.0"
+    image: local/opencode-sap-adt:2.0.23-mcp2.7.0
+    init: true
+    stdin_open: true
+    tty: true
+    environment:
+      SAP_DEFAULT_SYSTEM: ${SAP_DEFAULT_SYSTEM:-}
+      SAP_DEV_URL: ${SAP_DEV_URL:-}
+      SAP_DEV_CLIENT: ${SAP_DEV_CLIENT:-}
+      SAP_DEV_USER: ${SAP_DEV_USER:-}
+      SAP_DEV_PASSWORD: ${SAP_DEV_PASSWORD:-}
+      SAP_DEV_INSECURE_TLS: ${SAP_DEV_INSECURE_TLS:-false}
+      SAP_QTY_URL: ${SAP_QTY_URL:-}
+      SAP_QTY_CLIENT: ${SAP_QTY_CLIENT:-}
+      SAP_QTY_USER: ${SAP_QTY_USER:-}
+      SAP_QTY_PASSWORD: ${SAP_QTY_PASSWORD:-}
+      SAP_QTY_INSECURE_TLS: ${SAP_QTY_INSECURE_TLS:-false}
+      SAP_PRD_URL: ${SAP_PRD_URL:-}
+      SAP_PRD_CLIENT: ${SAP_PRD_CLIENT:-}
+      SAP_PRD_USER: ${SAP_PRD_USER:-}
+      SAP_PRD_PASSWORD: ${SAP_PRD_PASSWORD:-}
+      SAP_PRD_INSECURE_TLS: ${SAP_PRD_INSECURE_TLS:-false}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+    volumes:
+      - type: bind
+        source: ${SAP_WORKSPACE:-C:/Users/bodim/Desktop/Projects/opencode/test-skill-ddic-6}
+        target: /workspace
+        bind:
+          create_host_path: false
+      - opencode-data:/home/node/.local/share/opencode
+      - opencode-cache:/home/node/.cache/opencode
+      - opencode-state:/home/node/.local/state/opencode
+volumes:
+  opencode-data:
+  opencode-cache:
+  opencode-state:
+
+
+

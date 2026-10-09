@@ -1,0 +1,26 @@
+{
+  "DEV": {
+    "url": "${env:SAP_DEV_URL}",
+    "client": "${env:SAP_DEV_CLIENT}",
+    "authType": "basic",
+    "user": "${env:SAP_DEV_USER}",
+    "password": "${env:SAP_DEV_PASSWORD}",
+    "insecureTls": false
+  },
+  "QTY": {
+    "url": "${env:SAP_QTY_URL}",
+    "client": "${env:SAP_QTY_CLIENT}",
+    "authType": "basic",
+    "user": "${env:SAP_QTY_USER}",
+    "password": "${env:SAP_QTY_PASSWORD}",
+    "insecureTls": false
+  },
+  "PRD": {
+    "url": "${env:SAP_PRD_URL}",
+    "client": "${env:SAP_PRD_CLIENT}",
+    "authType": "basic",
+    "user": "${env:SAP_PRD_USER}",
+    "password": "${env:SAP_PRD_PASSWORD}",
+    "insecureTls": false
+  }
+}

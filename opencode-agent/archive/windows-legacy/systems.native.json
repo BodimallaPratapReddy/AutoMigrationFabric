@@ -1,0 +1,27 @@
+{
+  "S4-DEMO": {
+    "url": "${env:ABAP_SAP_URL}",
+    "client": "800",
+    "authType": "basic",
+    "user": "${env:ABAP_SAP_USER}",
+    "password": "${env:ABAP_SAP_PASSWORD}",
+    "default": true,
+    "policy": {
+      "readOnly": true,
+      "allowDataPreview": true,
+      "allowFreeSql": true,
+      "deniedTools": [
+        "exportPackageSources",
+        "reentranceTicket",
+        "toolset:debugger",
+        "toolset:traces",
+        "toolset:git",
+        "toolset:tests",
+        "toolset:atc",
+        "toolset:rap",
+        "toolset:refactoring"
+      ]
+    },
+    "insecureTls": true
+  }
+}

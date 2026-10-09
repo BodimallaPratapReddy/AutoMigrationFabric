@@ -9,7 +9,7 @@ from thirdparty.configdb.repository import (
     ApprovedRuntimePlan, BatchObjectRunCreate, BatchRunCreate, ConfigDBRepository,
     MigrationPlanCreate, PlanStatus,
 )
-from .target_review import compare_columns
+from .target_review import compare_columns, compare_replication
 
 
 def _db() -> ConfigDBRepository:
@@ -78,10 +78,24 @@ def review_existing_target(payload: dict) -> dict:
     for match in matches:
         columns = [column.model_dump(mode="json")
                    for column in db.list_source_table_columns(match.guid)]
-        definitions.append({"source_table_guid": str(match.guid),
+        definition = {"source_table_guid": str(match.guid),
             "plan_guid": str(match.plan_guid),
             "provisioning_status": match.provisioning_status,
-            "comparison": compare_columns(table_plan["columns"], columns)})
+            "comparison": compare_columns(table_plan["columns"], columns,
+                                          detailed=payload.get("review_replication", False))}
+        if payload.get("review_replication"):
+            for field in ("connection_name", "source_system_type", "source_object_type",
+                          "source_schema_name", "source_table_name"):
+                if str(getattr(match, field, None) or "").upper() != str(target.get(field) or "").upper():
+                    raise ValueError("Existing target belongs to a different source; choose another Fabric target")
+            config = db.get_replication_config(match.guid)
+            definition["replication_comparison"] = compare_replication(
+                table_plan["replication"], config.model_dump(mode="json") if config else None)
+            definition["same"] = (definition["comparison"]["same"]
+                                  and definition["replication_comparison"]["same"])
+        definitions.append(definition)
+    if payload.get("review_replication") and len(definitions) > 1:
+        raise ValueError("Multiple active configurations exist for this target; reconcile them before changing it")
     return {"target": {"workspace_id": target["fabric_workspace_id"],
                        "lakehouse_id": target["fabric_lakehouse_id"],
                        "schema": target["fabric_lakehouse_schema"],
@@ -297,11 +311,19 @@ def fail_migration(payload: dict) -> None:
                 db.mark_replication_failed(table.guid, message)
             except ValueError:
                 pass
-    plan = db.get_migration_plan(guid)
-    if plan and plan.status not in {PlanStatus.FAILED, PlanStatus.CANCELLED}:
-        db.update_migration_plan_status(guid, expected_status=plan.status,
-                                        new_status=PlanStatus.CANCELLED if payload.get("cancelled") else PlanStatus.FAILED,
-                                        expected_plan_version=plan.plan_version)
+    for attempt in range(3):
+        plan = db.get_migration_plan(guid)
+        if not plan or plan.status in {PlanStatus.FAILED, PlanStatus.CANCELLED}:
+            break
+        try:
+            db.update_migration_plan_status(guid, expected_status=plan.status,
+                new_status=PlanStatus.CANCELLED if payload.get("cancelled") else PlanStatus.FAILED,
+                expected_plan_version=plan.plan_version)
+            break
+        except ValueError:
+            # A timed-out synchronous save can finish between this read and update.
+            if attempt == 2:
+                raise
 
 
 ACTIVITIES = [create_migration_plan, set_temporal_ids, transition_plan,
