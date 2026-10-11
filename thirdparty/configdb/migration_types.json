@@ -1,6 +1,7 @@
 {
   "ORACLE": [
-    {"value": "ORACLE_TABLE", "label": "Oracle table"}
+    {"value": "ORACLE_TABLE", "label": "Oracle table"},
+    {"value": "ORACLE_VIEW", "label": "Oracle view and base tables"}
   ],
   "SAP_ECC": [
     {"value": "SAP_TABLE", "label": "SAP table"},

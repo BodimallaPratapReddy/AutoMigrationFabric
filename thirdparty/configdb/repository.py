@@ -149,6 +149,7 @@ class SourceTableCreate(DBRow):
     fabric_lakehouse_schema: str = Field(alias="FabricLakehouseSchema", min_length=1)
     fabric_table_name: str = Field(alias="FabricTableName", min_length=1)
     source_schema_name: str | None = Field(default=None, alias="SourceSchemaName")
+    extract_sql: str | None = Field(default=None, alias="ExtractSql", min_length=1)
     parent_source_object_guid: UUID | None = Field(default=None, alias="ParentSourceObjectGUID")
     parent_source_index: int | None = Field(default=None, ge=0, exclude=True)
     data_source_type: str | None = Field(default=None, alias="DataSourceType")
@@ -262,6 +263,11 @@ class SourceTablePlan(DBRow):
         names = [column.column_name.upper() for column in self.columns]
         if len(set(positions)) != len(positions) or len(set(names)) != len(names):
             raise ValueError("table column positions and names must be unique")
+        if self.table.extract_sql is not None:
+            from thirdparty.oracle.extraction import build_extract_sql
+            expected = build_extract_sql(self.table.model_dump(), [c.model_dump() for c in self.columns])
+            if self.table.extract_sql != expected:
+                raise ValueError("ExtractSql differs from approved source expressions")
         if self.replication.delete_policy is not None:
             self.replication.delete_policy = validate_delete_policy(
                 self.replication.delete_policy, [column.column_name for column in self.columns],
@@ -440,6 +446,8 @@ def _runtime_fingerprint(plan: ApprovedRuntimePlan) -> str:
     # Adding nullable policy fields must not change fingerprints for older plans
     # replaying a persistence activity that already committed.
     for table in payload["tables"]:
+        if table["table"].get("extract_sql") is None:
+            table["table"].pop("extract_sql", None)
         for name in ("delete_policy", "key_validation"):
             if table["replication"].get(name) is None:
                 table["replication"].pop(name, None)
@@ -1124,7 +1132,7 @@ class ConfigDBRepository(ConfigDB):
         "ApplicationComponent, Delta, ReplicationMethod, ObjectRole, FabricWorkspaceName, "
         "FabricWorkspaceId, FabricLakehouseName, FabricLakehouseId, FabricLakehouseSchema, "
         "FabricTableName, ProvisioningStatus, ProvisioningError, LastProvisioningRunId, "
-        "ProvisionedTimestamp, IsActive"
+        "ProvisionedTimestamp, IsActive, ExtractSql"
     )
 
     def get_source_table(self, source_table_guid: UUID) -> SourceTableRecord | None:

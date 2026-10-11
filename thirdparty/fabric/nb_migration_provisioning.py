@@ -1,4 +1,6 @@
-# Fabric provisioning script. In Fabric, mark the first code cell as parameters.
+# Fabric provisioning script. In Fabric, mark the parameter cell as parameters.
+# Provide sqlglot==29.0.1 in the Fabric environment; CTE handling installs it if absent.
+# SQL_VIEW definitions with CTEs use scoped expansion to avoid INVALID_VIEW_TEXT.
 # Source row loading belongs exclusively to the scheduled replication pipeline.
 # Historical reload requests reset ReplicationState.LastWatermarkValue to NULL.
 # Apply configdb/migrations/003_target_change_runs.sql before ALTER_BACKFILL or
@@ -7,6 +9,7 @@
 plan_guid = ""  # Required Text parameter supplied by the app
 CREATIONREQUEST = "BOTH"  # Optional manual scope: TABLE, VIEW, BOTH
 RUN_MODE = "PROVISION"  # Interactive modes: PROVISION, TEST, DIAGNOSE
+VALIDATE_EXISTING_TABLES_FOR_PLAN = ""  # Explicit recovery only, after prior creation evidence
 
 # %%
 
@@ -402,9 +405,12 @@ def get_spark() -> Any:
     """Return the active Spark session (the predefined ``spark`` in Fabric notebooks)."""
     existing = globals().get("spark")
     if existing is not None:
+        existing.conf.set("spark.sql.session.timeZone", "UTC")
         return existing
     from pyspark.sql import SparkSession
-    return SparkSession.builder.getOrCreate()
+    session = SparkSession.builder.getOrCreate()
+    session.conf.set("spark.sql.session.timeZone", "UTC")
+    return session
 
 
 def first_line(exc: BaseException, limit: int = 110) -> str:
@@ -650,6 +656,7 @@ class ObjectResult:
     completed_at: Optional[str] = None
     rows_written: Optional[int] = None
     message: Optional[str] = None
+    error_code: Optional[str] = None
 
     def to_report(self) -> Dict[str, Any]:
         report: Dict[str, Any] = {
@@ -658,7 +665,7 @@ class ObjectResult:
             "status": self.status,
             "duration_seconds": round(max(float(self.duration_seconds), 0.0), 2),
         }
-        for key in ("started_at", "completed_at", "rows_written", "message"):
+        for key in ("started_at", "completed_at", "rows_written", "message", "error_code"):
             value = getattr(self, key)
             if value is not None:
                 report[key] = value
@@ -675,14 +682,23 @@ def run_timed(object_type: str, name_ref: Dict[str, str],
     FAILED result with a short, secret-free message.
     """
     started_at, t0 = utc_now_iso(), time.monotonic()
+    error_code = None
     try:
         message, rows = action()
         status = Status.SUCCESS
     except Exception as exc:  # noqa: BLE001 - converted into a FAILED result
         message, rows, status = safe_message(exc), None, Status.FAILED
+        for accessor in ("getCondition", "getErrorClass"):
+            try:
+                value = getattr(exc, accessor)()
+                if value and re.fullmatch(r"[A-Z_]+(?:\.[A-Z_]+)*", value):
+                    error_code = value[:160]
+                    break
+            except Exception:  # Some Spark versions do not expose either accessor.
+                pass
         LOG.error("%s %s failed: %s", object_type, name_ref.get("name"), message)
     return ObjectResult(object_type, name_ref["name"], status,
-                        time.monotonic() - t0, started_at, utc_now_iso(), rows, message)
+                        time.monotonic() - t0, started_at, utc_now_iso(), rows, message, error_code)
 
 # %% [markdown]
 # ## 6. ConfigRepository - read access to the configuration tables
@@ -926,7 +942,8 @@ class ConfigRepository:
                               column_rows: Sequence[Tuple[Any, ...]], replication_updates: Dict[str, Any],
                               complete_run_guid: Optional[str] = None,
                               resume_ingestion: Optional[bool] = None,
-                              reset_watermark: bool = False) -> None:
+                              reset_watermark: bool = False,
+                              extract_sql: Optional[str] = None) -> None:
         """
         Replace the recorded columns and update ReplicationConfig in ONE transaction.
 
@@ -956,8 +973,8 @@ class ConfigRepository:
                     f"WHERE SourceTableGUID = ?", tuple(replication_updates.values()) + (source_table_guid,))
                 if changed != 1:
                     raise TargetStateError("ReplicationConfig row for the target was not found; nothing was saved.")
-            if self._db.execute(f"UPDATE {s}.SourceTables SET UpdatedTimestamp = SYSUTCDATETIME() WHERE GUID = ?",
-                                (source_table_guid,)) != 1:
+            if self._db.execute(f"UPDATE {s}.SourceTables SET ExtractSql = ?, UpdatedTimestamp = SYSUTCDATETIME() WHERE GUID = ?",
+                                (extract_sql, source_table_guid)) != 1:
                 raise TargetStateError("Target record disappeared; nothing was saved.")
             if reset_watermark and self._db.execute(
                     f"UPDATE {s}.ReplicationState SET LastWatermarkValue = NULL, Status = 'NOT_STARTED', "
@@ -1425,10 +1442,59 @@ def prepare_select(view_sql: str) -> str:
     return text
 
 
+def inline_view_ctes(select: str) -> str:
+    """Avoid Fabric persisting qualified CTE names as invalid view text.
+
+    Expand scoped, non-recursive CTE references as derived tables; preserve every
+    projection, join, aggregation and window expression. No datatype mappings.
+    Notebook deployments need sqlglot==29.0.1 for SQL_VIEW definitions with WITH.
+    """
+    if not re.search(r"\bWITH\b", select, re.I):
+        return select
+    try:
+        import sqlglot
+        from sqlglot import exp
+        from sqlglot.optimizer.scope import Scope, traverse_scope
+    except ImportError:
+        # A pure Python dependency can be imported without restarting Spark/Python,
+        # preserving the injected parameters and returning failures in the object report.
+        import subprocess
+        import sys
+        try:
+            subprocess.run([sys.executable, "-m", "pip", "install", "sqlglot==29.0.1"],
+                           check=True, timeout=120, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            import sqlglot
+            from sqlglot import exp
+            from sqlglot.optimizer.scope import Scope, traverse_scope
+        except (subprocess.SubprocessError, OSError, ImportError):
+            raise ValidationError("Cannot load sqlglot==29.0.1; install it in the notebook environment.") from None
+    tree = sqlglot.parse_one(select, read="spark")
+    for item in tree.find_all(exp.With):
+        if item.args.get("recursive"):
+            raise ValidationError("Recursive CTEs are unsupported for persisted Fabric views.")
+    for item in tree.find_all(exp.CTE):
+        if item.alias_column_names:
+            raise ValidationError("CTE column alias lists require explicit projection aliases.")
+    # Reusing volatile CTE expressions can change evaluation counts when expanded.
+    if list(tree.find_all(exp.Rand)) or list(tree.find_all(exp.Randn)) or list(tree.find_all(exp.Uuid)):
+        raise ValidationError("Volatile CTE expressions require a separate view design.")
+    for scope in traverse_scope(tree):
+        for node, source in scope.selected_sources.values():
+            if isinstance(node, exp.Table) and isinstance(source, Scope):
+                alias = node.args.get("alias")
+                alias = alias.copy() if alias else exp.TableAlias(this=node.this.copy())
+                node.replace(exp.Subquery(this=source.expression.copy(), alias=alias))
+        scope.expression.set("with_", None)
+        if len(tree.sql(dialect="spark")) > 1_000_000:
+            raise ValidationError("Expanded view SQL exceeds 1 MB.")
+    return tree.sql(dialect="spark")
+
+
 def build_create_view_sql(spec: ViewSpec) -> str:
     """CREATE OR REPLACE VIEW (SQL_VIEW) or CREATE OR REPLACE TABLE ... AS (materialised types)."""
     select = prepare_select(spec.view_sql)
     if spec.view_type == "SQL_VIEW":
+        select = inline_view_ctes(select)
         comment = f" COMMENT {sql_literal(spec.description[:1000])}" if spec.description else ""
         return f"CREATE OR REPLACE VIEW {spec.target.fq}{comment} AS\n{select}"
     return f"CREATE OR REPLACE TABLE {spec.target.fq} USING DELTA AS\n{select}"
@@ -1489,11 +1555,13 @@ def run_table_provision(plan_guid: str, object_guid: str, run_id: str = "",
         mgr = manager or DeltaTableManager()
         LOG.info("[%s] create table %s", run_id, spec.target.display)
         if mgr.exists(spec.target):
-            if CREATE_NEW_ALLOWS_IDENTICAL_EXISTING and plan_schema_changes(
+            recovery = (is_valid_uuid(VALIDATE_EXISTING_TABLES_FOR_PLAN)
+                        and norm_guid(VALIDATE_EXISTING_TABLES_FOR_PLAN) == norm_guid(plan_guid))
+            if (CREATE_NEW_ALLOWS_IDENTICAL_EXISTING or recovery) and plan_schema_changes(
                     mgr.physical_columns(spec.target), spec.columns).is_empty:
                 return "Table already exists; schema validated", None
             raise TargetStateError("Target table already exists" +
-                                   (" with a different schema." if CREATE_NEW_ALLOWS_IDENTICAL_EXISTING else "."))
+                                   (" with a different schema." if CREATE_NEW_ALLOWS_IDENTICAL_EXISTING or recovery else "."))
         mgr.create(spec)
         mgr.verify(spec)
         return "Table created; schema validated", 0
@@ -1536,7 +1604,8 @@ def _revise_planned(change: TargetChange, repo_factory: Callable[[], Any], mgr: 
     check_against_approval(compare_definitions(existing.columns, change.columns), change.approved_comparison, required=True)
     with repo_factory() as repo:
         repo.apply_metadata_change(existing.guid, "PENDING", build_column_insert_rows(change.columns, existing_rows),
-                                   replication_updates(change.replication))
+                                   replication_updates(change.replication),
+                                   **({"extract_sql": change.proposed_table["extract_sql"]} if change.proposed_table.get("extract_sql") else {}))
         if "ingestion_flag" in change.replication:
             repo.set_ingestion_flag(existing.guid, bool(change.replication["ingestion_flag"]))
     return "Planned configuration revised; no physical table created", None
@@ -1601,7 +1670,8 @@ def _alter_future(change: TargetChange, repo_factory: Callable[[], Any], mgr: De
         mutated = True                                                # from here ingestion stays paused on failure
         with repo_factory() as repo:
             repo.apply_metadata_change(guid, "PROVISIONED", build_column_insert_rows(proposed, existing_rows),
-                                       replication_updates(change.replication))
+                                       replication_updates(change.replication),
+                                       **({"extract_sql": change.proposed_table["extract_sql"]} if change.proposed_table.get("extract_sql") else {}))
             final_flag = original_flag  # The proposal uses False as a staging default, not a user pause request.
             if final_flag is not None:
                 repo.set_ingestion_flag(guid, final_flag)
@@ -1679,7 +1749,8 @@ def _reload_change(change: TargetChange, plan_guid: str, repo_factory: Callable[
             repo.apply_metadata_change(
                 guid, 'PROVISIONED', build_column_insert_rows(change.columns, previous_rows),
                 replication_updates(change.replication), complete_run_guid=plan_guid,
-                resume_ingestion=original_flag, reset_watermark=True)
+                resume_ingestion=original_flag, reset_watermark=True,
+                **({"extract_sql": change.proposed_table["extract_sql"]} if change.proposed_table.get("extract_sql") else {}))
         message = (f'{change.decision}: structure updated; watermark reset to NULL; '
                    'historical data loading is delegated to the scheduled replication pipeline')
         if not original_flag:

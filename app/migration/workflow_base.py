@@ -75,6 +75,9 @@ class MigrationWorkflowBase:
         if len(names) != len(expected) or len(set(names)) != len(names) or set(names) != expected:
             raise ValueError("Every discovered Oracle column must be mapped exactly once")
         selected = {item["name"]: normalize_fabric_type(item["fabric_type"]) for item in choices}
+        if self.state["review"].get("discovery_provider") == "OPENCODE":
+            if any(selected[c["column_name"]] != c["fabric_data_type"] for c in planned):
+                raise ValueError("Revise mappings in the agent plan before approval")
         for column in planned:
             column["fabric_data_type"] = selected[column["column_name"]]
         for column in self.state["review"]["columns"]:
@@ -296,6 +299,11 @@ class MigrationWorkflowBase:
         self.state["provisioning_status"] = "SUCCEEDED"
         self.state["replication_status"] = "SKIPPED"
 
+    async def _discover(self, input: dict, lakehouse_name: str, discovery_activity: str) -> dict:
+        return await self._activity(discovery_activity,
+            {"input": input, "lakehouse_name": lakehouse_name},
+            timeout=300 if discovery_activity == "discover_rebuild" else 120, retry=READ_RETRY)
+
     async def _run(self, input: dict, discovery_activity: str) -> dict:
         self._input = input
         info = workflow.info()
@@ -318,10 +326,7 @@ class MigrationWorkflowBase:
             self._phase("VALIDATING_SOURCE")
             fabric = await self._activity("validate_fabric", input, retry=READ_RETRY)
             self._phase("DISCOVERING_SOURCE")
-            discovered = await self._activity(discovery_activity,
-                {"input": input, "lakehouse_name": fabric["lakehouse_name"]},
-                timeout=300 if discovery_activity == "discover_rebuild" else 120,
-                retry=READ_RETRY)
+            discovered = await self._discover(input, fabric["lakehouse_name"], discovery_activity)
             if discovered.get("failure_reason"):
                 self.state["last_error"] = discovered["failure_reason"]
                 await self._activity("transition_plan", {"plan_guid": guid, "version": 1,

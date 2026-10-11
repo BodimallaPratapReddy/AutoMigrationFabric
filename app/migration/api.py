@@ -18,6 +18,10 @@ from .migration_types import MigrationTypeOption, load_migration_types
 from .mapping_types import normalize_fabric_type
 from .target_review import allowed_target_decisions
 from .worker import TASK_QUEUE
+from .agent_forms import validate_reply
+from .contracts import AgentReply, AgentFeedback
+from .workflow_opencode import OpenCodeOracleMigrationWorkflow
+from .workflow_view_replication import OpenCodeOracleViewReplicationWorkflow
 from thirdparty.configdb.repository import ConfigDBRepository
 from thirdparty.configdb.utils import ConfigDB
 from .workflows import (
@@ -86,12 +90,19 @@ async def _start(client: Client, request: MigrationInput, expected: str,
 
 @router.post("/oracle-table", response_model=StartedMigration)
 async def start_oracle(request: MigrationInput, client: TemporalClient) -> StartedMigration:
-    return await _start(client, request, "ORACLE_TABLE", OracleTableMigrationWorkflow, "oracle-table")
+    workflow_class = (OpenCodeOracleMigrationWorkflow if request.discovery_provider == "OPENCODE"
+                      else OracleTableMigrationWorkflow)
+    return await _start(client, request, "ORACLE_TABLE", workflow_class, "oracle-table")
 
 
 @router.post("/sap-table", response_model=StartedMigration)
 async def start_sap_table(request: MigrationInput, client: TemporalClient) -> StartedMigration:
     return await _start(client, request, "SAP_TABLE", SAPTableMigrationWorkflow, "sap-table")
+
+
+@router.post("/oracle-view", response_model=StartedMigration)
+async def start_oracle_view(request: MigrationInput, client: TemporalClient) -> StartedMigration:
+    return await _start(client, request, "ORACLE_VIEW", OpenCodeOracleViewReplicationWorkflow, "oracle-view")
 
 
 @router.post("/sap-odp", response_model=StartedMigration)
@@ -200,7 +211,8 @@ async def _command(client: Client, workflow_id: str, action: str,
         raise HTTPException(409, f"{action} is unavailable in {state.phase}")
     if action in {"approve_primary_key", "edit_primary_key"}:
         review = state.review or {}
-        if (state.migration_approach not in {"ORACLE_TABLE", "SAP_TABLE"}
+        if (state.migration_approach not in {"ORACLE_TABLE", "SAP_TABLE"} and not
+                (state.migration_approach == "ORACLE_VIEW" and review.get("view_base_table"))
                 or (review.get("primary_key_source") == "DATABASE"
                     and (review.get("key_validation") or {}).get("valid") is not False)
                 or (review.get("primary_key") and not review.get("primary_key_source"))):
@@ -226,12 +238,17 @@ async def _command(client: Client, workflow_id: str, action: str,
                        for item in columns]
         except ValueError as exc:
             raise HTTPException(422, str(exc)) from exc
+        if (state.review or {}).get("discovery_provider") == "OPENCODE":
+            proposed = {item["name"]: item["fabric_type"] for item in review_columns}
+            if any(item["fabric_type"] != proposed[item["name"]] for item in columns):
+                raise HTTPException(422, "Mappings must come from the agent plan; reject and revise the plan")
         if any(item.get("supported") is False for item in review_columns) and not acknowledge_unsupported:
             raise HTTPException(422, "Acknowledge unsupported Oracle mappings before approval")
     if watermark_column is not None:
         candidates = (state.review or {}).get("watermark_candidates", [])
         if (action not in {"approve_plan", "approve_watermark"}
-                or state.migration_approach not in {"ORACLE_TABLE", "SAP_TABLE"}
+                or (state.migration_approach not in {"ORACLE_TABLE", "SAP_TABLE"} and not
+                    (state.migration_approach == "ORACLE_VIEW" and (state.review or {}).get("view_base_table")))
                 or watermark_column not in {item["column_name"] for item in candidates}):
             raise HTTPException(422, "Select a discovered date or timestamp watermark column")
         if not state.review.get("primary_key"):
@@ -249,7 +266,8 @@ async def _command(client: Client, workflow_id: str, action: str,
             raise HTTPException(422, "Choose an action valid for this target")
     if action == "approve_delete_policy":
         review = state.review or {}
-        if state.migration_approach != "ORACLE_TABLE":
+        if state.migration_approach != "ORACLE_TABLE" and not (
+                state.migration_approach == "ORACLE_VIEW" and review.get("view_base_table")):
             raise HTTPException(409, "Delete policy approval is supported for Oracle tables")
         try:
             delete_policy = validate_delete_policy(delete_policy,
@@ -268,6 +286,31 @@ async def _command(client: Client, workflow_id: str, action: str,
     if delete_policy is not None:
         command["delete_policy"] = delete_policy
     await client.get_workflow_handle(workflow_id).signal("command", command)
+    return {"accepted": True}
+
+
+@router.post("/{workflow_id}/agent-reply")
+async def reply_to_agent(workflow_id: str, reply: AgentReply, client: TemporalClient) -> dict:
+    state = await _state(client, workflow_id)
+    if state.status != "RUNNING" or state.phase != "WAITING_FOR_AGENT_INPUT" or not state.agent_request:
+        raise HTTPException(409, "Workflow is not waiting for an agent answer")
+    payload = {"action": "agent_reply", "actor": reply.approved_by,
+               "request_id": reply.request_id, "answer": reply.answer, "decision": reply.decision}
+    try:
+        validate_reply(state.agent_request, payload)
+    except (ValueError, TypeError) as exc:
+        raise HTTPException(422, str(exc)) from exc
+    await client.get_workflow_handle(workflow_id).signal("command", payload)
+    return {"accepted": True}
+
+
+@router.post("/{workflow_id}/agent-feedback")
+async def agent_feedback(workflow_id: str, feedback: AgentFeedback, client: TemporalClient) -> dict:
+    state = await _state(client, workflow_id)
+    if state.status != "RUNNING" or state.phase != "WAITING_FOR_AGENT_REVISION":
+        raise HTTPException(409, "Workflow is not waiting for an agent revision")
+    await client.get_workflow_handle(workflow_id).signal("command", {
+        "action": "agent_feedback", "actor": feedback.submitted_by, "message": feedback.message})
     return {"accepted": True}
 
 

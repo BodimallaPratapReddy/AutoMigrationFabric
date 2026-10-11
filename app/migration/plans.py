@@ -8,6 +8,7 @@ from thirdparty.configdb.repository import (
 )
 from thirdparty.datatype_mapping import map_oracle_table_columns, map_sap_field
 from thirdparty.oracle.utils import OracleTableInspection
+from thirdparty.oracle.extraction import attach_extract_sql
 from thirdparty.sap.utils import SAPDeltaDetails, SAPODPCapability, SAPTableSchema, is_sap_watermark_field
 
 from .contracts import MigrationInput
@@ -87,7 +88,9 @@ def oracle_plan(input: MigrationInput, lakehouse_name: str,
             primary_key_columns=sorted(keys) or None,
             ingestion_flag=False, pipeline_workspace_id=input.fabric_workspace_id,
             pipeline_item_id=input.replication_pipeline_id))
+    extract_sql = attach_extract_sql(plan)
     return plan, {"source": f"{inspection.schema_name}.{inspection.table_name}",
+                  "extract_sql": extract_sql,
                   "columns": review_columns, "primary_key": sorted(keys),
                   "unique_keys": [key.model_dump(mode="json") for key in inspection.unique_keys],
                   "indexes": [index.model_dump(mode="json") for index in inspection.indexes],

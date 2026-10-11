@@ -19,8 +19,10 @@ def _db() -> ConfigDBRepository:
 @activity.defn(name="create_migration_plan")
 def create_migration_plan(payload: dict) -> str:
     approach = payload["migration_approach"]
-    system = "ORACLE" if approach == "ORACLE_TABLE" else "SAP_ECC"
+    system = "ORACLE" if approach in {"ORACLE_TABLE", "ORACLE_VIEW"} else "SAP_ECC"
     object_type = "TABLE" if approach in {"ORACLE_TABLE", "SAP_TABLE"} else "SAP_DATASOURCE"
+    if approach == "ORACLE_VIEW":
+        object_type = "VIEW"
     plan_id = uuid5(NAMESPACE_URL, f"fabric-migration:{payload['workflow_id']}")
     return str(_db().create_migration_plan(MigrationPlanCreate(
         source_connection_name=payload["source_connection_name"],
@@ -93,6 +95,12 @@ def review_existing_target(payload: dict) -> dict:
                 table_plan["replication"], config.model_dump(mode="json") if config else None)
             definition["same"] = (definition["comparison"]["same"]
                                   and definition["replication_comparison"]["same"])
+            proposed_sql = target.get("extract_sql")
+            if proposed_sql and proposed_sql != getattr(match, "extract_sql", None):
+                definition["same"] = False
+                definition["replication_comparison"]["changed"].append({
+                    "name": "extract_sql", "before": getattr(match, "extract_sql", None),
+                    "after": proposed_sql})
         definitions.append(definition)
     if payload.get("review_replication") and len(definitions) > 1:
         raise ValueError("Multiple active configurations exist for this target; reconcile them before changing it")
@@ -157,6 +165,8 @@ def finish_target_change(payload: dict) -> None:
 @activity.defn(name="start_batch")
 def start_batch(payload: dict) -> str:
     batch_id = uuid5(UUID(payload["plan_guid"]), f"batch:{payload['batch_type']}")
+    if payload.get("attempt_version"):
+        batch_id = uuid5(UUID(payload["plan_guid"]), f"view-provisioning:{payload['attempt_version']}")
     db = _db()
     db.start_batch_run(BatchRunCreate(
         batch_type=payload["batch_type"], plan_guid=UUID(payload["plan_guid"]),
@@ -164,6 +174,8 @@ def start_batch(payload: dict) -> str:
         temporal_run_id=payload["run_id"]), batch_run_id=batch_id)
     tables = db.list_source_tables_for_plan(UUID(payload["plan_guid"]))
     for table in tables:
+        if payload.get("pending_only") and table.provisioning_status == "PROVISIONED":
+            continue
         old = None
         if payload["batch_type"] == "REPLICATION":
             state = db.get_replication_state(table.guid)
@@ -174,6 +186,8 @@ def start_batch(payload: dict) -> str:
             batch_object_run_id=uuid5(batch_id, f"table:{table.guid}"))
     if payload["batch_type"] == "PROVISIONING":
         for view in db.list_fabric_views_for_plan(UUID(payload["plan_guid"])):
+            if payload.get("pending_only") and view.provisioning_status == "PROVISIONED":
+                continue
             db.start_batch_object_run(BatchObjectRunCreate(
                 batch_run_id=batch_id, object_type="VIEW", object_guid=view.view_guid,
                 object_name=view.view_name),

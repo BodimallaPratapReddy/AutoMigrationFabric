@@ -94,6 +94,16 @@ test('unique-index proposal fills all composite fields and still requires approv
   assert.ok(fields.children.every(label => label.children[0].checked));
 });
 
+test('moving to another base table resets key fields even when keys have the same names', () => {
+  const h = harness('fields', ['ID']);
+  vm.runInContext("current.review.source='ONT.HEADER';renderPrimaryKeyFields()", h.context);
+  const fields = h.element('primary-key-fields');
+  const firstKey = fields.dataset.reviewKey;
+  vm.runInContext("current.review.source='ONT.ITEM';current.review.columns=[{name:'ID'},{name:'LINE'}];renderPrimaryKeyFields()", h.context);
+  assert.notEqual(fields.dataset.reviewKey, firstKey);
+  assert.equal(fields.children.length, 2);
+});
+
 test('combined delete policy submits source values and reconciliation interval after confirmation', async () => {
   const h = harness(undefined, []);
   vm.runInContext(`current.phase = 'WAITING_FOR_DELETE_POLICY_APPROVAL';

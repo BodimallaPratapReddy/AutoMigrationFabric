@@ -18,6 +18,7 @@ dependencies = [
     "oracledb>=2.0.0",
     "python-dotenv",
     "temporalio>=1.10,<2",
+    "sqlglot>=29,<30",
 ]
 
 [tool.setuptools.packages.find]

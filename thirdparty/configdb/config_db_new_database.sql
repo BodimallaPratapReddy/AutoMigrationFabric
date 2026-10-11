@@ -445,6 +445,8 @@ CREATE TABLE bronze_replication.SourceTables
 
     FabricTableName         nvarchar(256) NOT NULL,
 
+    ExtractSql              nvarchar(max) NULL,
+
     ProvisioningStatus      varchar(50) NOT NULL
         CONSTRAINT DF_SourceTables_ProvisioningStatus DEFAULT ('PENDING'),
     -- PENDING
@@ -1177,6 +1179,7 @@ SELECT
     st.SourceObjectType,
     st.SourceSchemaName,
     st.SourceTableName,
+    st.ExtractSql,
 
     st.FabricWorkspaceId,
     st.FabricLakehouseName,

@@ -9,6 +9,7 @@ from pydantic import BaseModel
 CONFIG_PATH = Path(__file__).resolve().parents[2] / "thirdparty" / "configdb" / "migration_types.json"
 SUPPORTED_APPROACHES = {
     "ORACLE_TABLE": "ORACLE",
+    "ORACLE_VIEW": "ORACLE",
     "SAP_TABLE": "SAP_ECC",
     "SAP_ODP": "SAP_ECC",
     "SAP_REBUILD": "SAP_ECC",

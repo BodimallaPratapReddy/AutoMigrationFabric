@@ -24,7 +24,7 @@
     button:disabled { opacity: .5; cursor: default; }
     .actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 15px; }
     .wide { grid-column: 1 / -1; }
-    .hidden { display: none; }
+    .hidden { display: none !important; }
     .status { display: grid; grid-template-columns: 160px 1fr; gap: 7px 12px; margin: 0; }
     .status dt { color: #5c7181; }
     .status dd { margin: 0; overflow-wrap: anywhere; font-weight: 600; }
@@ -58,6 +58,8 @@
           <option value="">Select a source connection first</option>
         </select>
         <div id="schema-wrap"><label for="schema">Oracle source schema</label><input id="schema" name="source_schema_name"></div>
+        <label for="discovery-provider">Oracle discovery</label>
+        <select id="discovery-provider"><option value="OPENCODE">OpenCode agent</option><option value="BUILTIN">Built-in discovery</option></select>
         <label id="source-label" for="source">Source table or DataSource</label><input id="source" name="source_object_name" required>
         <label for="workspace">Fabric workspace</label>
         <select id="workspace" name="fabric_workspace_id" required disabled>
@@ -85,6 +87,7 @@
       <p id="message" class="error" role="alert"></p>
       <p id="empty" class="muted">Start a migration or enter a workflow ID.</p>
       <dl id="status" class="status hidden"></dl>
+      <p id="agent-summary" role="status"></p>
     </section>
     <section id="connection-section" class="wide hidden">
       <h2>Create source connection</h2>
@@ -112,8 +115,22 @@
         <div class="actions"><button type="submit">Save connection</button><button id="close-connection" type="button" class="secondary">Close</button></div>
       </form>
     </section>
+    <section id="agent-section" class="wide hidden">
+      <h2>Agent discovery</h2>
+      <p id="agent-session" class="muted"></p>
+      <p id="agent-validation" class="error"></p>
+      <pre id="agent-progress" aria-live="polite"></pre>
+      <form id="agent-form" class="hidden">
+        <div id="agent-fields"></div>
+        <label for="agent-actor">Your name</label><input id="agent-actor" required>
+        <p id="agent-error" class="error" role="alert"></p>
+        <button id="agent-submit" type="submit">Send answer to agent</button>
+      </form>
+      <details><summary>View agent plan</summary><pre id="agent-report"></pre></details>
+    </section>
     <section id="review-section" class="wide hidden">
       <h2 id="review-title">Review</h2>
+      <div id="view-bundle-wrap" class="hidden"></div>
       <pre id="review"></pre>
       <div id="runtime-grid-wrap" class="hidden">
         <p id="runtime-plan-summary" class="muted"></p>
@@ -222,7 +239,7 @@
     let lakehouses = [];
     let lakehouseRequestVersion = 0;
     let lakehouseRequestController = null;
-    const routes = {ORACLE_TABLE:'oracle-table', SAP_TABLE:'sap-table', SAP_ODP:'sap-odp', SAP_REBUILD:'sap-rebuild'};
+    const routes = {ORACLE_TABLE:'oracle-table', ORACLE_VIEW:'oracle-view', SAP_TABLE:'sap-table', SAP_ODP:'sap-odp', SAP_REBUILD:'sap-rebuild'};
     let approachesBySource = {};
     const display = value => value == null ? '—' : String(value);
     function setMessage(message) { $('message').textContent = message || ''; }
@@ -289,7 +306,8 @@
     }
     function renderColumnGrid() {
       const body = $('column-grid-body');
-      if (body.dataset.workflowId === current.workflow_id) return;
+      const reviewId = current.workflow_id + ':' + (current.review.source || '');
+      if (body.dataset.workflowId === reviewId) return;
       body.replaceChildren();
       for (const column of current.review.columns || []) {
         const row = document.createElement('tr');
@@ -298,6 +316,7 @@
         const typeCell = document.createElement('td');
         const input = document.createElement('input');
         input.value = column.fabric_type;
+        input.readOnly = current.review.discovery_provider === 'OPENCODE';
         input.dataset.columnName = column.name;
         input.setAttribute('list', 'fabric-type-options');
         input.setAttribute('aria-label', `Fabric type for ${column.name}`);
@@ -306,6 +325,10 @@
         const note = document.createElement('td');
         note.className = 'muted'; note.textContent =
           `${column.supported === false ? 'Requires review. ' : ''}${mappingReason(column)}`;
+        if (current.review.discovery_provider === 'OPENCODE') {
+          note.textContent += ` Target: ${column.target_name || column.name}. ` +
+            `Expression: ${column.source_expression || 'Direct'}. ${column.transformation_notes || ''}`;
+        }
         if (column.supported === false || column.lossy) row.style.backgroundColor = '#fff3df';
         row.append(name, source, typeCell, note);
         body.append(row);
@@ -313,7 +336,14 @@
       $('unsupported-ack-wrap').classList.toggle('hidden',
         !(current.review.columns || []).some(column => column.supported === false));
       $('unsupported-ack').checked = false;
-      body.dataset.workflowId = current.workflow_id;
+      body.dataset.workflowId = reviewId;
+      if (current.review.extract_sql) {
+        const row = document.createElement('tr');
+        const cell = document.createElement('td'); cell.colSpan = 4;
+        const query = document.createElement('pre');
+        query.textContent = 'Oracle extraction SELECT\n' + current.review.extract_sql;
+        cell.append(query); row.append(cell); body.append(row);
+      }
     }
     function showWatermarkChoice() {
       const choice = $('watermark').value;
@@ -352,7 +382,7 @@
     for (const input of document.querySelectorAll('input[name="primary-key-choice"]'))
       input.addEventListener('change', showPrimaryKeyChoice);
     function renderPrimaryKeyFields() {
-      const key = current.workflow_id + ':' + JSON.stringify(current.review.primary_key || []) +
+      const key = current.workflow_id + ':' + (current.review.source || '') + ':' + JSON.stringify(current.review.primary_key || []) +
         ':' + (current.review.primary_key_source || '') +
         ':' + JSON.stringify(current.review.primary_key_candidates || []);
       if ($('primary-key-fields').dataset.reviewKey === key) return;
@@ -399,7 +429,8 @@
       $('soft-delete-watermark-wrap').classList.toggle('hidden', !current?.review?.selected_watermark);
     }
     function renderDeletePolicy() {
-      if ($('delete-policy-wrap').dataset.workflowId !== current.workflow_id) {
+      const reviewId = current.workflow_id + ':' + (current.review.source || '');
+      if ($('delete-policy-wrap').dataset.workflowId !== reviewId) {
         $('soft-delete-column').replaceChildren(new Option('Choose a source field', ''),
           ...(current.review.columns || []).map(column => new Option(column.name, column.name)));
         $('delete-mode').value = '';
@@ -408,7 +439,7 @@
         $('soft-delete-values').value = '';
         $('soft-delete-watermark-confirmed').checked = false;
         $('reconcile-interval').value = '1440';
-        $('delete-policy-wrap').dataset.workflowId = current.workflow_id;
+        $('delete-policy-wrap').dataset.workflowId = reviewId;
       }
       const keyed = (current.review.primary_key || []).length && current.review.key_validation?.valid === true;
       for (const option of $('delete-mode').options)
@@ -522,8 +553,10 @@
     $('workspace').addEventListener('change', loadLakehouses);
     $('lakehouse-retry').addEventListener('click', loadLakehouses);
     function showApproach() {
-      $('schema-wrap').classList.toggle('hidden', $('approach').value !== 'ORACLE_TABLE');
-      $('source-label').textContent = ({ORACLE_TABLE: 'Oracle source table',
+      $('schema-wrap').classList.toggle('hidden', !['ORACLE_TABLE','ORACLE_VIEW'].includes($('approach').value));
+      $('discovery-provider').disabled = $('approach').value === 'ORACLE_VIEW';
+      if ($('approach').value === 'ORACLE_VIEW') $('discovery-provider').value = 'OPENCODE';
+      $('source-label').textContent = ({ORACLE_TABLE: 'Oracle source table', ORACLE_VIEW: 'Oracle source view',
         SAP_TABLE: 'SAP source table', SAP_ODP: 'SAP ODP DataSource',
         SAP_REBUILD: 'SAP DataSource'})[$('approach').value] || 'Source table or DataSource';
     }
@@ -589,12 +622,151 @@
         $('connection-list-message').textContent = `Saved ${created.connection_name}.`;
       } catch (error) { $('connection-message').textContent = error.message; }
     });
+    function renderAgent() {
+      $('agent-section').classList.toggle('hidden', !current.agent_session_id);
+      $('agent-session').textContent = current.agent_session_id || '';
+      $('agent-validation').textContent = current.agent_validation_error || '';
+      $('agent-report').textContent = current.agent_report || '';
+      $('agent-progress').textContent = (current.agent_progress || []).map(x => `${x.tool}: ${x.status}`).join('\n') ||
+        current.current_message || '';
+      $('agent-summary').textContent = current.phase === 'WAITING_FOR_AGENT_REVISION' ?
+        'Agent paused for your feedback. ' + (current.agent_validation_error || '') + ' See Agent discovery below.' :
+        current.phase === 'WAITING_FOR_AGENT_INPUT' ? 'Agent needs your answer. See Agent discovery below.' :
+        current.phase === 'WAITING_FOR_AGENT' ? 'Agent is working. Latest tools: ' +
+          ((current.agent_progress || []).map(x => `${x.tool} (${x.status})`).join(', ') || 'Waiting for activity update…') : '';
+      const pending = current.status === 'RUNNING' &&
+        ['WAITING_FOR_AGENT_INPUT', 'WAITING_FOR_AGENT_REVISION'].includes(current.phase);
+      $('agent-form').classList.toggle('hidden', !pending);
+      if (!pending) { $('agent-fields').dataset.requestId = ''; return; }
+      const revision = current.phase === 'WAITING_FOR_AGENT_REVISION';
+      const req = current.agent_request;
+      const key = `${current.workflow_id}:${revision ? current.agent_report : req?.id}`;
+      if ($('agent-fields').dataset.requestId === key) return;
+      const container = $('agent-fields'); container.replaceChildren();
+      $('agent-error').textContent = '';
+      $('agent-submit').disabled = false;
+      const fields = revision ? [{key:'feedback', title:'Decisions or corrections for the agent', type:'string'}] :
+        req.kind === 'PERMISSION' ? [{key:'decision', title:`Permission: ${req.action} — ${(req.resources || []).join(', ')}`,
+          type:'string', options:[{value:'reject',label:'Reject'},{value:'once',label:'Allow once'}]}] : req.fields;
+      for (const field of fields) {
+        const label = document.createElement('label'); label.textContent = field.title || field.key;
+        const help = document.createElement('p'); help.textContent = field.description || ''; help.className = 'muted';
+        if (field.type === 'external' || field.when?.length || field.hidden) {
+          help.textContent = 'This form requires the OpenCode interface. Resolve it there; this page will continue polling.';
+          container.append(label, help); $('agent-submit').disabled = true; continue;
+        }
+        let input;
+        if (field.type === 'multiselect' || (field.options?.length && !field.custom) || field.type === 'boolean') {
+          input = document.createElement('select'); input.multiple = field.type === 'multiselect';
+          const options = field.type === 'boolean' ? [{value:'true',label:'Yes'},{value:'false',label:'No'}] : field.options;
+          if (!input.multiple) input.add(new Option('Choose…', ''));
+          for (const option of options) input.add(new Option(option.label || option.value, option.value));
+        } else {
+          input = document.createElement('input');
+          input.type = ['number','integer'].includes(field.type) ? 'number' : 'text';
+          if (input.type === 'number') input.step = field.type === 'integer' ? '1' : 'any';
+          if (field.options?.length) help.textContent += ' Options: ' + field.options.map(x => x.value).join(', ');
+        }
+        input.dataset.agentKey = field.key; input.dataset.agentType = field.type;
+        input.required = field.required !== false; input.id = `agent-answer-${container.childElementCount}`;
+        label.htmlFor = input.id;
+        container.append(label, help, input);
+      }
+      container.dataset.requestId = key;
+    }
+    $('agent-form').addEventListener('submit', async event => {
+      event.preventDefault();
+      const values = {};
+      for (const input of $('agent-fields').querySelectorAll('[data-agent-key]')) {
+        values[input.dataset.agentKey] = input.dataset.agentType === 'multiselect' ?
+          Array.from(input.selectedOptions, option => option.value) : input.dataset.agentType === 'boolean' ?
+          input.value === 'true' : ['number','integer'].includes(input.dataset.agentType) ? Number(input.value) : input.value;
+      }
+      const revision = current.phase === 'WAITING_FOR_AGENT_REVISION';
+      const body = revision ? {submitted_by:$('agent-actor').value, message:values.feedback} :
+        {approved_by:$('agent-actor').value, request_id:current.agent_request.id,
+          ...(current.agent_request.kind === 'PERMISSION' ? {decision:values.decision} : {answer:values})};
+      $('agent-submit').disabled = true;
+      try {
+        await request(`/migrations/${encodeURIComponent(current.workflow_id)}/agent-${revision ? 'feedback' : 'reply'}`,
+          {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)});
+        $('agent-error').textContent = 'Answer submitted. Waiting for the agent…';
+        await refresh();
+      } catch (error) { $('agent-error').textContent = error.message; $('agent-submit').disabled = false; }
+    });
+    function renderOracleViewBundle() {
+      const container = $('view-bundle-wrap');
+      const plan = current.review.agent_plan;
+      const key = current.workflow_id + ':' + JSON.stringify(plan) + ':' + JSON.stringify(current.review.table_reviews || []);
+      if (container.dataset.planKey === key) return;
+      container.replaceChildren();
+      const summary = document.createElement('p');
+      summary.textContent = `${plan.tables.length} base tables and ${plan.views.length} views. ` +
+        'Approval saves the complete plan. Scheduled loading uses each table’s approved replication settings after provisioning.';
+      container.append(summary);
+      const correction = current.review.correction;
+      if (correction) {
+        summary.textContent = `SQL correction ${correction.attempt}/${correction.maximum_attempts}. ` +
+          `Approval saves plan version ${correction.proposed_version} and retries failed views. Successful objects are reused.`;
+        const error = document.createElement('pre');
+        error.textContent = 'Notebook failure\n' + JSON.stringify(correction.failure, null, 2);
+        container.append(error);
+        for (const change of correction.changes) {
+          const diff = document.createElement('pre');
+          diff.textContent = `${change.name}\nPrevious Spark SQL\n${change.before}\n\nCorrected Spark SQL\n${change.after}`;
+          container.append(diff);
+        }
+      }
+      for (const warning of current.review.warnings || []) {
+        const note = document.createElement('p'); note.textContent = warning; note.className = 'muted'; container.append(note);
+      }
+      for (const table of plan.tables) {
+        const reviewed = (current.review.table_reviews || []).find(r => r.source === `${table.source_schema}.${table.source_table}`);
+        const details = document.createElement('details');
+        const title = document.createElement('summary');
+        title.textContent = `${table.source_schema}.${table.source_table} → ${table.target_table} ` +
+          `(${table.columns.length} columns; key: ${(reviewed?.primary_key || table.primary_key).join(', ') || 'none'})`;
+        if (reviewed) {
+          const replication = document.createElement('pre');
+          replication.textContent = 'Approved replication\n' + JSON.stringify({
+            method: reviewed.load_method, write_strategy: reviewed.write_strategy,
+            watermark: reviewed.selected_watermark || null, key_validation: reviewed.key_validation,
+            delete_policy: reviewed.delete_policy}, null, 2);
+          details.append(replication);
+          if (reviewed.extract_sql) {
+            const extraction = document.createElement('pre');
+            extraction.textContent = 'Oracle extraction SELECT\n' + reviewed.extract_sql;
+            details.append(extraction);
+          }
+        }
+        const pre = document.createElement('pre');
+        pre.textContent = table.columns.map(c => `${c.name}: ${c.source_type} → ${c.fabric_type}` +
+          (c.target_name && c.target_name !== c.name ? ` as ${c.target_name}` : '') +
+          (c.source_expression ? `\n  Oracle extraction: ${c.source_expression}` : '') +
+          (c.warning ? `\n  Warning: ${c.warning}` : '')).join('\n');
+        details.append(title, pre); container.append(details);
+      }
+      for (const view of plan.views) {
+        const details = document.createElement('details');
+        const title = document.createElement('summary');
+        const identity = `${view.source_schema}.${view.source_view}`;
+        title.textContent = `${identity} → ${view.target_name}`;
+        const dependencies = document.createElement('p'); dependencies.textContent = 'Depends on: ' + view.dependencies.join(', ');
+        const source = document.createElement('pre'); source.textContent = 'Oracle source SQL\n' +
+          current.review.oracle_view_definitions[identity];
+        const target = document.createElement('pre'); target.textContent = 'Proposed Spark SQL\n' + view.spark_sql;
+        const notes = document.createElement('p'); notes.textContent = view.translation_notes.join('\n');
+        details.append(title, dependencies, source, target, notes); container.append(details);
+      }
+      container.dataset.planKey = key;
+    }
     async function refresh() {
       const id = $('lookup').value.trim();
       if (!id || refreshInProgress) return;
       refreshInProgress = true;
       try {
         current = await request(`/migrations/${encodeURIComponent(id)}`);
+        renderAgent();
         setMessage('');
         $('empty').classList.add('hidden'); $('status').classList.remove('hidden');
         const fields = [['Workflow ID', current.workflow_id], ['Migration type', current.migration_approach],
@@ -630,12 +802,21 @@
           const runtimeGrid = !analysis && !plan && !mapping && !primaryKey && !deletePolicy && !watermark && !targetChange &&
             Array.isArray(current.review.columns);
           const canFeedback = plan || (analysis && current.review.route === 'FUNCTION_MODULE');
-          $('review-title').textContent = targetChange ? 'Existing target structure — change approval' :
+          $('review-title').textContent = current.review.correction ? 'Corrected view SQL — review before retry' : targetChange ? 'Existing target structure — change approval' :
             deletePolicy ? 'Oracle delete handling' : primaryKey ? 'Primary key fields' : mapping ? 'Oracle column mappings' :
             watermark ? `${current.migration_approach === 'SAP_TABLE' ? 'SAP' : 'Oracle'} watermark` :
-            analysis ? 'SAP analysis review' : plan ? 'Fabric plan review' : 'Runtime plan review';
+            analysis ? 'SAP analysis review' : plan ? 'Fabric plan review' :
+              current.migration_approach === 'ORACLE_VIEW' ? 'Oracle view and base-table plan review' : 'Runtime plan review';
           $('review').textContent = JSON.stringify(current.review, null, 2);
-          $('review').classList.toggle('hidden', mapping || primaryKey || runtimeGrid);
+          if (current.review.view_base_table) {
+            $('review-title').textContent = `Base table ${current.review.base_table_index}/${current.review.base_table_count}: ${current.review.source}`;
+            if (current.review.mapping_error || current.review.watermark_error)
+              setReviewMessage(current.review.mapping_error || current.review.watermark_error);
+          }
+          const viewBundle = current.review.kind === 'oracle_view_bundle';
+          $('view-bundle-wrap').classList.toggle('hidden', !viewBundle);
+          if (viewBundle) renderOracleViewBundle();
+          $('review').classList.toggle('hidden', mapping || primaryKey || runtimeGrid || viewBundle);
           $('runtime-grid-wrap').classList.toggle('hidden', !runtimeGrid);
           if (runtimeGrid) renderRuntimeGrid();
           $('column-grid-wrap').classList.toggle('hidden', !mapping);
@@ -646,7 +827,7 @@
           $('edit-primary-key').textContent = current.review.primary_key_source ?
             'Edit primary key fields' : 'Specify primary key fields';
           $('approve').textContent = targetChange ? 'Record target change choice' :
-            deletePolicy ? 'Confirm delete policy and save plan' : primaryKey ? 'Confirm primary key decision' :
+            deletePolicy ? (current.review.view_base_table ? 'Confirm table delete policy' : 'Confirm delete policy and save plan') : primaryKey ? 'Confirm primary key decision' :
             mapping ? 'Confirm column mappings' :
             watermark ? (current.review.delete_policy_required ? 'Confirm replication method' : 'Confirm watermark and save plan') : 'Approve';
           if (mapping) renderColumnGrid();
@@ -697,7 +878,7 @@
               select.dataset.workflowId = current.workflow_id;
             }
           }
-          const watermarkReviewKey = current.workflow_id + ':' + JSON.stringify(current.review.primary_key || []) +
+          const watermarkReviewKey = current.workflow_id + ':' + (current.review.source || '') + ':' + JSON.stringify(current.review.primary_key || []) +
             ':' + (current.review.primary_key_source || '');
           if (watermark && $('watermark').dataset.reviewKey !== watermarkReviewKey) {
             $('watermark').replaceChildren();
@@ -726,9 +907,10 @@
           if (timer) clearInterval(timer);
           timer = null;
           current = null;
+          $('agent-summary').textContent = '';
           if (localStorage.getItem('migrationWorkflowId') === id)
             localStorage.removeItem('migrationWorkflowId');
-          for (const section of ['status', 'review-section', 'audit-section',
+          for (const section of ['status', 'review-section', 'agent-section', 'audit-section',
             'provisioning-report-section', 'cancel']) $(section).classList.add('hidden');
           $('empty').classList.remove('hidden');
           setMessage(error.status === 404 ?
@@ -745,6 +927,7 @@
     $('start-form').addEventListener('submit', async event => {
       event.preventDefault();
       const data = Object.fromEntries(new FormData(event.target).entries());
+      data.discovery_provider = ['ORACLE_TABLE','ORACLE_VIEW'].includes(data.migration_approach) ? $('discovery-provider').value : 'BUILTIN';
       const allowed = approachesBySource[selectedSourceType()] || [];
       if (!allowed.some(option => option.value === data.migration_approach)) {
         setMessage('Select a source connection and a matching migration type.');

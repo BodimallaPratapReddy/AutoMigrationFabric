@@ -53,7 +53,7 @@ def test_options_and_start_use_connection_type(monkeypatch):
         client = TestClient(app)
         options = client.get("/migrations/options")
         assert options.status_code == 200
-        assert [item["value"] for item in options.json()["ORACLE"]] == ["ORACLE_TABLE"]
+        assert [item["value"] for item in options.json()["ORACLE"]] == ["ORACLE_TABLE", "ORACLE_VIEW"]
         assert [item["value"] for item in options.json()["SAP_ECC"]] == [
             "SAP_TABLE", "SAP_ODP", "SAP_REBUILD"]
         mismatch = client.post("/migrations/sap-table", json=_input("Oracle Local", "SAP_TABLE"))
@@ -72,6 +72,12 @@ def test_options_and_start_use_connection_type(monkeypatch):
         valid = client.post("/migrations/oracle-table", json=_input("Oracle Local", "ORACLE_TABLE"))
         assert valid.status_code == 200
         assert len(temporal.started) == 1
+        view = client.post("/migrations/oracle-view", json={
+            **_input("Oracle Local", "ORACLE_TABLE"), "migration_approach": "ORACLE_VIEW",
+            "discovery_provider": "OPENCODE", "source_object_name": "VW_ORDERS"})
+        assert view.status_code == 200
+        assert len(temporal.started) == 2
+        assert temporal.started[-1][0][0].__qualname__.startswith("OpenCodeOracleViewReplicationWorkflow")
     finally:
         app.dependency_overrides.pop(api.get_temporal_client, None)
 
