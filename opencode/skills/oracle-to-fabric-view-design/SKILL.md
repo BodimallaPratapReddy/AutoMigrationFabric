@@ -5,6 +5,8 @@ description: Traces Oracle view dependencies and designs equivalent Spark SQL vi
 
 # Oracle view to Fabric design
 
+For every base table, apply the table skill's database/ETRM description policy: return the original Oracle table and column comments in `description` and the separately looked-up detailed ETRM descriptions in `etrm_description`. Missing database comments remain NULL even if ETRM text exists. The table-provisioning notebook comments come only from database descriptions; view `translation_notes` retain their separate business-comment contract.
+
 Before generating or correcting any Lakehouse view SQL, read and apply [Lakehouse view best practices](references/lakehouse-view-best-practices.md). Generate Spark SQL with readable CTE layers for complex logic, explicit qualified projections, justified casts, exact financial arithmetic and preserved Oracle NULL/window semantics. Complete its final review checklist. Keep catalog descriptions short; place detailed technical evidence separately. Best practices must preserve the source view's business results and the app's existing output contract.
 
 Read [business-specific BLOB handling](../oracle-to-fabric-table-design/references/blob-handling.md) for every BLOB in the dependency graph. Attachment BLOBs become nullable STRING file-path columns with typed NULL extraction; payload migration belongs to a separate attachment process. Trace projections through mapped paths while preserving verified view output aliases. BLOB-content operations and presence predicates cannot be silently replaced with path operations; flag material semantic conflicts. The confirmed non-attachment exact-hex exception requires verified business meaning and complete extraction without truncation.

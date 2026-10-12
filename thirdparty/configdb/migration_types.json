@@ -5,6 +5,7 @@
   ],
   "SAP_ECC": [
     {"value": "SAP_TABLE", "label": "SAP table"},
+    {"value": "SAP_VIEW", "label": "SAP view and base tables"},
     {"value": "SAP_ODP", "label": "SAP ODP DataSource"},
     {"value": "SAP_REBUILD", "label": "SAP DataSource rebuild"}
   ]

@@ -5,6 +5,10 @@ description: 'Create an Oracle-to-Fabric Migration Report from an Oracle owner a
 
 # Oracle to Fabric Table Design
 
+## Database and ETRM descriptions
+
+For the table and every column, keep two separate values in the app JSON contract. `description` is exactly the original Oracle `ALL_TAB_COMMENTS.COMMENTS` or `ALL_COL_COMMENTS.COMMENTS` text, including NULL when absent. Read these dictionary comments explicitly; never place inferred business meaning or ETRM text in this field. `etrm_description` is the detailed description from the matching standard table/column in ETRM documentation, not an evidence record, URL or generated summary. Perform the ETRM lookup for the table and its columns, verify the exact object and applicable release, and preserve the available detailed description. Use NULL and a warning when the matching description is unavailable; do not borrow similarly named objects or invent descriptions. Keep any documentation URLs in existing evidence/report references. Return both fields explicitly, including NULLs. The provisioning notebook uses only database `description` for table and column COMMENT clauses; ETRM text is stored separately in ConfigDB. Apply this rule equally to base tables discovered during view migration.
+
 Produce an evidence-based migration design for one Oracle table. Default to a Fabric Lakehouse Delta table unless the user explicitly requests Fabric Warehouse.
 
 ## Required Input

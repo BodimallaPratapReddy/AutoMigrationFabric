@@ -25,6 +25,7 @@ def compare_columns(proposed: list[dict], existing: list[dict], *, detailed: boo
                 item.update(primary_key=bool(column.get("is_primary_key")),
                             source_type=(column.get("source_data_type") or "").upper(),
                             source_expression=column.get("source_expression"),
+                            etrm_description=column.get("etrm_description"),
                             description=column.get("description"))
         return result
 
@@ -40,6 +41,7 @@ def compare_columns(proposed: list[dict], existing: list[dict], *, detailed: boo
                     and old["nullable"] != new["nullable"])
                 or (old["source_type"] and new["source_type"] and old["source_type"] != new["source_type"])
                 or old["source_expression"] != new["source_expression"]
+                or new["etrm_description"] is not None and old["etrm_description"] != new["etrm_description"]
                 or (new["description"] is not None and old["description"] != new["description"]))
     changed = [{"before": before[name], "after": after[name]}
                for name in sorted(before.keys() & after.keys()) if differs(name)]

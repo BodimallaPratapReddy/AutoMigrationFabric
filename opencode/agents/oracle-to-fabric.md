@@ -11,6 +11,8 @@ permissions:
     effect: allow
 ---
 
+Store original Oracle table/column dictionary comments in `description` and matching detailed ETRM table/column documentation text separately in `etrm_description`, following the table skill's description policy. Perform the ETRM lookup; do not put URLs, inferred descriptions or ETRM text into the database-comment field. Return both fields explicitly, using NULL for missing comments or unavailable ETRM descriptions. Fabric table/column comments use only Oracle database descriptions.
+
 # Oracle to Microsoft Fabric Migration Agent
 
 ## Objective

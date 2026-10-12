@@ -13,6 +13,7 @@ class FakeHandle:
     async def describe(self):
         class Description:
             status = WorkflowExecutionStatus.RUNNING
+            run_id = 'current-run'
         return Description()
 
     async def query(self, name):
@@ -37,9 +38,25 @@ class FakeClient:
     def __init__(self):
         self.handle = FakeHandle()
 
-    def get_workflow_handle(self, workflow_id):
+    def get_workflow_handle(self, workflow_id, run_id=None):
         assert workflow_id == "oracle-test"
+        assert run_id in {None,'current-run'}
         return self.handle
+
+
+def test_replaying_running_workflow_is_temporary_service_error_not_closed():
+    from temporalio.service import RPCError,RPCStatusCode
+    temporal=FakeClient()
+    async def replaying_query(name):
+        raise RPCError('Worker query unavailable during replay',RPCStatusCode.FAILED_PRECONDITION,b'')
+    original=temporal.handle.query;temporal.handle.query=replaying_query
+    app.dependency_overrides[get_temporal_client]=lambda:temporal
+    try:
+        client=TestClient(app)
+        assert client.get('/migrations/oracle-test').status_code==503
+        temporal.handle.query=original
+        assert client.get('/migrations/oracle-test').status_code==200
+    finally:app.dependency_overrides.clear()
 
 
 def test_delete_approval_validates_key_field_values_interval_and_watermark_confirmation():
@@ -258,6 +275,7 @@ def test_completed_workflow_status_uses_stored_result_without_replay():
     async def completed_description():
         class Description:
             status = WorkflowExecutionStatus.COMPLETED
+            run_id = 'current-run'
         return Description()
 
     async def completed_result():

@@ -54,6 +54,8 @@ def record_view_attempt(payload: dict) -> dict:
 
 @activity.defn
 def persist_view_correction(payload: dict) -> int:
+    from .sap_bundle_storage import expand_bundle
+    payload={**payload,'previous':expand_bundle(payload['previous']),'proposed':expand_bundle(payload['proposed'])}
     changes = validate_correction(payload["previous"], payload["proposed"], payload["eligible"])
     if not str(payload.get("actor") or "").strip():
         raise ValueError("SQL correction requires a reviewer")

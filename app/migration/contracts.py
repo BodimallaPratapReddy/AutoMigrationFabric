@@ -6,7 +6,7 @@ from uuid import UUID
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 
-Approach = Literal["ORACLE_TABLE", "ORACLE_VIEW", "SAP_TABLE", "SAP_ODP", "SAP_REBUILD"]
+Approach = Literal["ORACLE_TABLE", "ORACLE_VIEW", "SAP_TABLE", "SAP_VIEW", "SAP_ODP", "SAP_REBUILD"]
 
 
 class MigrationInput(BaseModel):
@@ -37,12 +37,12 @@ class MigrationInput(BaseModel):
 
     @model_validator(mode="after")
     def validate_source(self) -> "MigrationInput":
-        if self.discovery_provider == "OPENCODE" and self.migration_approach not in {"ORACLE_TABLE", "ORACLE_VIEW"}:
-            raise ValueError("OpenCode discovery currently supports Oracle tables")
+        if self.discovery_provider == "OPENCODE" and self.migration_approach not in {"ORACLE_TABLE", "ORACLE_VIEW", "SAP_TABLE", "SAP_VIEW", "SAP_ODP", "SAP_REBUILD"}:
+            raise ValueError("OpenCode discovery supports Oracle and SAP tables/views")
         if self.migration_approach in {"ORACLE_TABLE", "ORACLE_VIEW"} and not self.source_schema_name:
             raise ValueError("Oracle table migrations require source_schema_name")
-        if self.migration_approach == "ORACLE_VIEW" and self.discovery_provider != "OPENCODE":
-            raise ValueError("Oracle view migrations require OpenCode discovery")
+        if self.migration_approach in {"ORACLE_VIEW", "SAP_VIEW"} and self.discovery_provider != "OPENCODE":
+            raise ValueError("View migrations require OpenCode discovery")
         return self
 
 
@@ -113,6 +113,7 @@ class MigrationState(BaseModel):
     agent_request: dict | None = None
     agent_report: str | None = None
     agent_validation_error: str | None = None
+    agent_blocker: dict | None = None
     view_correction_attempt: int = 0
 
 

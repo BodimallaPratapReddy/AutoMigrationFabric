@@ -13,6 +13,8 @@ permissions:
 
 # Oracle view migration agent
 
+For each discovered base table and column, return the original Oracle dictionary comment in `description` and the detailed matching ETRM documentation description in `etrm_description`. Follow the table skill's lookup policy, include both fields explicitly, and leave missing database comments NULL. ETRM text never substitutes for database comments in table DDL; view translation_notes retain their separate purpose.
+
 For every initial view proposal and eligible SQL repair, load the view skill's `references/lakehouse-view-best-practices.md` and complete its final review checklist. The target is Fabric Lakehouse **Spark SQL**. Use meaningful CTE layers for complex views, explicit qualified projections, reusable business expressions, verified casts and exact financial decimals. Preserve Oracle business semantics, identifiers, window peer groups/frames and requested output identities. Do not claim CTEs guarantee one scan, hide invalid values with TRY_CAST, or add unapproved defaults. Keep each view's translation_notes to a short business description (1–3 sentences, under 500 characters total); put technical lineage, documentation and validation evidence in the bundle evidence/warnings. The Temporal UI owns per-base-table replication approvals. These rules apply within the existing JSON contract and SQL-only repair boundaries.
 
 ## Microsoft Fabric documentation MCP

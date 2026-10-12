@@ -96,12 +96,16 @@ def adapt_view_bundle(text, source, lakehouse_name):
         targets[key] = target
         plan = item.model_dump(exclude={"target_table"})
         verified = graph["tables"][key]
+        if "description" in verified:
+            plan["description"] = verified["description"]
         actual = {c["column_name"] if "column_name" in c else c["name"] for c in verified["columns"]}
         if set(c.name for c in item.columns) != actual or len(item.columns) != len(actual):
             raise ValueError("Agent columns do not match verified Oracle table columns")
         metadata = {c["column_name"]: c for c in verified["columns"]}
         for column in item.columns:
             original = metadata[column.name]
+            if "description" in original:
+                next(c for c in plan["columns"] if c["name"] == column.name)["description"] = original["description"]
             deferred_attachment = (str(original.get("data_type", "")).upper() == "BLOB"
                 and original.get("nullable") is False and is_attachment_path_placeholder(column))
             if ("id" in original and column.position != original["id"]

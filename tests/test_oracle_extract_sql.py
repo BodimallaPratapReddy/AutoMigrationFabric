@@ -77,7 +77,8 @@ def test_nullable_field_preserves_legacy_runtime_fingerprint():
     plan=ApprovedRuntimePlan.model_validate(dict(plan_guid=str(uuid4()),plan_version=1,tables=bundle['tables'],views=[]))
     old=plan.model_dump(mode='json')
     for table in old['tables']:
-        table['table'].pop('extract_sql')
+        for key in ('extract_sql','description','etrm_description'): table['table'].pop(key,None)
+        for column in table['columns']: column.pop('etrm_description',None)
         for field in ('delete_policy','key_validation'):
             if table['replication'].get(field) is None: table['replication'].pop(field,None)
     old.update(dependency_indices=[],parent_source_indices=[None])

@@ -38,7 +38,7 @@ class OpenCodeOracleViewReplicationWorkflow(OpenCodeOracleViewCorrectionWorkflow
         try:
             for index, (table, review) in enumerate(zip(bundle["tables"], bundle_review["table_reviews"]), 1):
                 source = table["table"]
-                self._input = {**original_input, "migration_approach": "ORACLE_TABLE",
+                self._input = {**original_input, "migration_approach": getattr(self,'_source_table_approach','ORACLE_TABLE'),
                     "source_schema_name": source["source_schema_name"],
                     "source_object_name": source["source_table_name"]}
                 keys = table["replication"].get("primary_key_columns") or []

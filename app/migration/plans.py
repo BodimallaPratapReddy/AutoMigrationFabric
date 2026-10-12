@@ -68,6 +68,7 @@ def oracle_plan(input: MigrationInput, lakehouse_name: str,
     review_columns = []
     for column, mapping in zip(inspection.columns, map_oracle_table_columns(inspection.columns), strict=True):
         review_columns.append({"name": column.column_name, "source_type": column.datatype,
+                               "description": column.description,
                                "fabric_type": mapping.fabric_type, "warning": mapping.warning,
                                "supported": mapping.supported, "lossy": mapping.lossy,
                                "rule_name": mapping.rule_name})
@@ -89,8 +90,10 @@ def oracle_plan(input: MigrationInput, lakehouse_name: str,
             ingestion_flag=False, pipeline_workspace_id=input.fabric_workspace_id,
             pipeline_item_id=input.replication_pipeline_id))
     extract_sql = attach_extract_sql(plan)
+    plan.table.description = inspection.description
     return plan, {"source": f"{inspection.schema_name}.{inspection.table_name}",
                   "extract_sql": extract_sql,
+                  "description": inspection.description,
                   "columns": review_columns, "primary_key": sorted(keys),
                   "unique_keys": [key.model_dump(mode="json") for key in inspection.unique_keys],
                   "indexes": [index.model_dump(mode="json") for index in inspection.indexes],

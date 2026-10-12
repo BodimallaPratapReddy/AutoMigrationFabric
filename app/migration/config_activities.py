@@ -21,7 +21,7 @@ def create_migration_plan(payload: dict) -> str:
     approach = payload["migration_approach"]
     system = "ORACLE" if approach in {"ORACLE_TABLE", "ORACLE_VIEW"} else "SAP_ECC"
     object_type = "TABLE" if approach in {"ORACLE_TABLE", "SAP_TABLE"} else "SAP_DATASOURCE"
-    if approach == "ORACLE_VIEW":
+    if approach in {"ORACLE_VIEW", "SAP_VIEW"}:
         object_type = "VIEW"
     plan_id = uuid5(NAMESPACE_URL, f"fabric-migration:{payload['workflow_id']}")
     return str(_db().create_migration_plan(MigrationPlanCreate(
@@ -101,6 +101,11 @@ def review_existing_target(payload: dict) -> dict:
                 definition["replication_comparison"]["changed"].append({
                     "name": "extract_sql", "before": getattr(match, "extract_sql", None),
                     "after": proposed_sql})
+            for field in ("description", "etrm_description"):
+                if target.get(field) is not None and target[field] != getattr(match, field, None):
+                    definition["same"] = False
+                    definition["replication_comparison"]["changed"].append({
+                        "name": field, "before": getattr(match, field, None), "after": target[field]})
         definitions.append(definition)
     if payload.get("review_replication") and len(definitions) > 1:
         raise ValueError("Multiple active configurations exist for this target; reconcile them before changing it")

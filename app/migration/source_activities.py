@@ -80,4 +80,52 @@ def validate_oracle_key(payload: dict) -> dict:
                 "error": f"Source key check could not complete ({type(exc).__name__}); retry or use full load"}
 
 
-ACTIVITIES = [discover_oracle, discover_sap_table, discover_sap_odp, validate_oracle_key]
+@activity.defn(name='sap_agent_metadata')
+def sap_agent_metadata(payload: dict) -> dict:
+    input=MigrationInput.model_validate(payload['input'])
+    with sap_client(input.source_connection_name) as client:
+        client.test_connection()
+        if not client.table_exists(input.source_object_name):
+            raise ValueError('SAP source must be a visible transparent table')
+        schema=client.get_table_schema(input.source_object_name)
+        watermarks=client.get_watermark_candidates(input.source_object_name)
+        text=client.execute_sql_query(f"SELECT DDTEXT FROM DD02T WHERE TABNAME = '{input.source_object_name}' AND DDLANGUAGE = 'E' AND AS4LOCAL = 'A'",max_rows=1)
+        if not text.success:
+            raise ValueError('SAP table description lookup failed')
+        from .sap_semantics import read_semantics
+        semantics = read_semantics(client, schema.columns)
+        return dict(schema=schema.model_dump(mode='json'),watermark_candidates=[c.model_dump(mode='json') for c in watermarks],
+            description=text.rows[0].get('DDTEXT') if text.rows else None,semantic_metadata=semantics,
+            source_binding=dict(connection_name=input.source_connection_name,sap_client=client.sap_client,
+                host=client._http.base_url.host,https_port=client._http.base_url.port))
+
+
+@activity.defn(name='validate_sap_key')
+def validate_sap_key(payload: dict) -> dict:
+    from thirdparty.sap.extraction import identifier
+    from .primary_keys import validate_primary_key
+    input=MigrationInput.model_validate(payload['input'])
+    columns=payload['columns']
+    try:
+        table=identifier(input.source_object_name)
+        with sap_client(input.source_connection_name) as client:
+            schema=client.get_table_schema(table)
+            columns=validate_primary_key(columns,[c.fieldname for c in schema.columns])
+            if not columns: raise ValueError('Select at least one SAP key field')
+            from thirdparty.sap.extraction import quoted
+            names=[quoted(c) for c in columns]
+            date_keys={c.fieldname for c in schema.columns if c.datatype=='DATS'}
+            null_conditions=[f'{n} IS NULL' for n in names]
+            null_conditions += [f"{quoted(c)} = '00000000'" for c in columns if c in date_keys]
+            nulls=client.execute_sql_query(f"SELECT COUNT(*) AS BAD_KEYS FROM {quoted(table)} WHERE "+' OR '.join(null_conditions),max_rows=1)
+            duplicates=client.execute_sql_query(f"SELECT {', '.join(names)}, COUNT(*) AS KEY_COUNT FROM {quoted(table)} GROUP BY {', '.join(names)} HAVING COUNT(*) > 1",max_rows=1)
+            if not nulls.success or len(nulls.rows)!=1 or nulls.truncated or not duplicates.success or (duplicates.truncated and not duplicates.rows):
+                raise ValueError('SAP full-scope key validation was incomplete')
+            count=int(nulls.rows[0]['BAD_KEYS'])
+            return dict(valid=count==0 and not duplicates.rows,has_nulls=count>0,has_duplicates=bool(duplicates.rows),
+                columns=columns,status='CHECKED',scope='FULL_TABLE',sap_client=client.sap_client)
+    except Exception as exc:
+        return dict(valid=False,columns=columns,status='UNVERIFIED',error=f'SAP key validation did not complete ({type(exc).__name__}); retry or use full refresh')
+
+
+ACTIVITIES = [discover_oracle, discover_sap_table, discover_sap_odp, validate_oracle_key,sap_agent_metadata,validate_sap_key]

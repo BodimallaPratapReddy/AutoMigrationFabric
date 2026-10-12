@@ -132,6 +132,18 @@ and record a separate recovery batch. The original completed Temporal history re
 failed; it is not rewritten by a manual recovery.
 # Reviewed notebook SQL repairs
 
+Oracle table/base-table proposals carry `description` (original Oracle dictionary
+comment) and `etrm_description` (separately looked-up ETRM documentation text) at
+table and column level. They persist as `Description` and `EtrmDescription` on
+`SourceTables` and `SourceTableColumns`. Apply the additive
+`006_oracle_descriptions.sql` migration before updated API/worker/notebook use.
+The provisioning notebook generates table and column COMMENT clauses only from
+`Description`; absent database comments do not fall back to ETRM or inferred text.
+View base-table comments use independently verified Oracle graph metadata when
+available. ETRM lookup failures are recorded as warnings and NULL descriptions.
+Schema migration does not relabel old descriptions or modify existing Lakehouse
+comments; new approved plans carry the separated fields.
+
 New Oracle table proposals and view dependency table proposals include a generated
 Oracle `ExtractSql`, shown in the column review and final view bundle. It reuses
 approved scalar `source_expression` values, quotes source/target identifiers and

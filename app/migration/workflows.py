@@ -5,6 +5,10 @@ from temporalio import workflow
 from .workflow_base import MigrationWorkflowBase
 from .workflow_rebuild import SAPDataSourceRebuildWorkflow
 from .workflow_opencode import OpenCodeOracleMigrationWorkflow
+from .workflow_sap_opencode import OpenCodeSAPTableMigrationWorkflow
+from .workflow_sap_view import OpenCodeSAPViewMigrationWorkflow
+from .workflow_sap_mcp import OpenCodeMCPSAPTableMigrationWorkflow, OpenCodeMCPSAPViewMigrationWorkflow
+from .workflow_sap_datasource import OpenCodeSAPODPMigrationWorkflow, OpenCodeSAPDataSourceRebuildWorkflow
 from .workflow_oracle_view import OpenCodeOracleViewMigrationWorkflow
 from .workflow_view_correction import OpenCodeOracleViewCorrectionWorkflow
 from .workflow_view_replication import OpenCodeOracleViewReplicationWorkflow
@@ -34,4 +38,7 @@ class SAPODPDataSourceMigrationWorkflow(MigrationWorkflowBase):
 WORKFLOWS = [OracleTableMigrationWorkflow, SAPTableMigrationWorkflow,
              SAPODPDataSourceMigrationWorkflow, SAPDataSourceRebuildWorkflow,
              OpenCodeOracleMigrationWorkflow, OpenCodeOracleViewMigrationWorkflow,
-             OpenCodeOracleViewCorrectionWorkflow, OpenCodeOracleViewReplicationWorkflow]
+             OpenCodeOracleViewCorrectionWorkflow, OpenCodeOracleViewReplicationWorkflow,
+             OpenCodeSAPTableMigrationWorkflow, OpenCodeSAPViewMigrationWorkflow,
+             OpenCodeSAPODPMigrationWorkflow, OpenCodeSAPDataSourceRebuildWorkflow,
+             OpenCodeMCPSAPTableMigrationWorkflow,OpenCodeMCPSAPViewMigrationWorkflow]

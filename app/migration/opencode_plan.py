@@ -22,7 +22,8 @@ class AgentColumn(BaseModel):
     nullable: bool
     target_name: str | None = None
     source_expression: str | None = None
-    description: str | None = None
+    description: str | None = Field(default=None, description="Original ALL_COL_COMMENTS text only; null if absent, never ETRM or inferred text")
+    etrm_description: str | None = Field(default=None, description="Detailed description from the matching ETRM column documentation; null if unavailable")
     transformation_notes: str | None = None
     warning: str | None = None
 
@@ -32,6 +33,8 @@ class AgentPlan(BaseModel):
     schema_version: int = 1
     source_schema: str
     source_table: str
+    description: str | None = Field(default=None, description="Original ALL_TAB_COMMENTS text only; null if absent")
+    etrm_description: str | None = Field(default=None, description="Detailed table description from matching ETRM documentation; null if unavailable")
     columns: list[AgentColumn] = Field(min_length=1, max_length=1000)
     primary_key: list[str] = Field(description="Declared enabled database primary key in key order; empty if absent")
     watermark_candidates: list[str] = Field(description="Source date/timestamp candidates; not approved change tracking")
@@ -87,12 +90,14 @@ def adapt_plan(text: str, input: dict, lakehouse_name: str) -> dict:
             fabric_data_type=column.fabric_type, is_nullable=column.nullable,
             target_column_name=column.target_name, source_expression=column.source_expression,
             transformation_notes=column.transformation_notes, description=column.description,
+            etrm_description=column.etrm_description,
             is_primary_key=column.name in plan.primary_key,
             is_watermark_candidate=column.name in plan.watermark_candidates))
     runtime = SourceTablePlan(
         table=SourceTableCreate(connection_name=request.source_connection_name,
             source_system_type="ORACLE", source_object_type="TABLE",
             source_schema_name=plan.source_schema, source_table_name=plan.source_table,
+            description=plan.description, etrm_description=plan.etrm_description,
             fabric_workspace_id=request.fabric_workspace_id,
             fabric_lakehouse_id=request.fabric_lakehouse_id, fabric_lakehouse_name=lakehouse_name,
             fabric_lakehouse_schema=request.fabric_schema_name,
@@ -103,9 +108,11 @@ def adapt_plan(text: str, input: dict, lakehouse_name: str) -> dict:
     extract_sql = attach_extract_sql(runtime)
     return {"table_plan": runtime.model_dump(mode="json"), "review": {
         "extract_sql": extract_sql,
+        "description": plan.description, "etrm_description": plan.etrm_description,
         "source": f"{plan.source_schema}.{plan.source_table}", "discovery_provider": "OPENCODE",
         "agent_plan": plan.model_dump(), "columns": [dict(name=c.name, source_type=c.source_type,
             fabric_type=c.fabric_type, warning=c.warning, supported=True,
+            description=c.description, etrm_description=c.etrm_description,
             target_name=c.target_name, source_expression=c.source_expression,
             transformation_notes=c.transformation_notes) for c in plan.columns],
         "primary_key": plan.primary_key, "primary_key_candidates": [],

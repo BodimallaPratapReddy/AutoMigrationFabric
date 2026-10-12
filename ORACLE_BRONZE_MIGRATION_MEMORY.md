@@ -9,6 +9,7 @@ This document records the migration decisions, current configuration behavior, a
 | Area | Responsibility and status |
 | --- | --- |
 | Metadata discovery and type mapping | Application; implemented |
+| Oracle database and ETRM descriptions | New table/base-table plans store original database comments in `Description` and separate detailed ETRM descriptions in `EtrmDescription` at table and column level. Provisioning uses only database descriptions for table/column comments; missing database comments are not filled from ETRM. Existing records are not retroactively relabeled. |
 | Approved Oracle extraction SQL | New table plans and view base-table plans persist `SourceTables.ExtractSql`, exposed by `vw_ReplicationQueue`; scheduled pipeline metadata drift checks remain an external integration responsibility |
 | Key suggestions, user-selected keys, source null/duplicate profiling | Application; implemented |
 | Soft-delete and scheduled key-reconciliation configuration | Application and Config DB; implemented |

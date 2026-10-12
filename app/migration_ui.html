@@ -58,7 +58,7 @@
           <option value="">Select a source connection first</option>
         </select>
         <div id="schema-wrap"><label for="schema">Oracle source schema</label><input id="schema" name="source_schema_name"></div>
-        <label for="discovery-provider">Oracle discovery</label>
+        <label for="discovery-provider">Table discovery</label>
         <select id="discovery-provider"><option value="OPENCODE">OpenCode agent</option><option value="BUILTIN">Built-in discovery</option></select>
         <label id="source-label" for="source">Source table or DataSource</label><input id="source" name="source_object_name" required>
         <label for="workspace">Fabric workspace</label>
@@ -143,9 +143,9 @@
         <details><summary>View full plan details</summary><pre id="runtime-plan-details"></pre></details>
       </div>
       <div id="column-grid-wrap" class="grid-scroll hidden">
-        <p class="muted">Review each Oracle column and edit its Fabric type where needed. Confirm these mappings to continue to replication setup.</p>
+        <p class="muted" id="column-mapping-guidance">Review each source column and its proposed Fabric type.</p>
         <table class="mapping-grid">
-          <thead><tr><th>Source column</th><th>Oracle type</th><th>Fabric type</th><th>Mapping note</th></tr></thead>
+          <thead><tr><th>Source column</th><th>Source type</th><th>Fabric type</th><th>Mapping note</th></tr></thead>
           <tbody id="column-grid-body"></tbody>
         </table>
         <label id="unsupported-ack-wrap" class="hidden"><input id="unsupported-ack" type="checkbox">
@@ -239,7 +239,7 @@
     let lakehouses = [];
     let lakehouseRequestVersion = 0;
     let lakehouseRequestController = null;
-    const routes = {ORACLE_TABLE:'oracle-table', ORACLE_VIEW:'oracle-view', SAP_TABLE:'sap-table', SAP_ODP:'sap-odp', SAP_REBUILD:'sap-rebuild'};
+    const routes = {ORACLE_TABLE:'oracle-table', ORACLE_VIEW:'oracle-view', SAP_TABLE:'sap-table', SAP_VIEW:'sap-view', SAP_ODP:'sap-odp', SAP_REBUILD:'sap-rebuild'};
     let approachesBySource = {};
     const display = value => value == null ? '—' : String(value);
     function setMessage(message) { $('message').textContent = message || ''; }
@@ -251,6 +251,8 @@
     function mappingReason(column) {
       if (column.reason) return column.reason;
       if (column.warning) return column.warning;
+      if (column.source_expression)
+        return 'Applies the proposed extraction conversion shown below before loading the target type.';
       const source = (column.source_type || '').split('(')[0].trim().toUpperCase();
       const target = (column.fabric_type || '').trim().toUpperCase();
       const textTarget = /^(STRING|VARCHAR|CHAR|NVARCHAR)/.test(target);
@@ -278,7 +280,8 @@
       if (source.startsWith('TIMESTAMP') && target === 'TIMESTAMP')
         return 'Maps the source timestamp to the Lakehouse timestamp type.';
       if (source === target) return 'The source and target use the same datatype.';
-      return 'Uses the configured source-to-target datatype mapping; no additional explanation was supplied.';
+      return column.transformation_notes ? 'Uses the agent mapping explained below.' :
+        'Uses the proposed target type; no additional explanation was supplied.';
     }
     function renderRuntimeGrid() {
       const review = current.review;
@@ -329,6 +332,9 @@
           note.textContent += ` Target: ${column.target_name || column.name}. ` +
             `Expression: ${column.source_expression || 'Direct'}. ${column.transformation_notes || ''}`;
         }
+        note.textContent += ` Database description: ${column.description || '(none)'}.`;
+        if (current.migration_approach.startsWith('ORACLE'))
+          note.textContent += ` ETRM description: ${column.etrm_description || '(not available)'}.`;
         if (column.supported === false || column.lossy) row.style.backgroundColor = '#fff3df';
         row.append(name, source, typeCell, note);
         body.append(row);
@@ -341,7 +347,9 @@
         const row = document.createElement('tr');
         const cell = document.createElement('td'); cell.colSpan = 4;
         const query = document.createElement('pre');
-        query.textContent = 'Oracle extraction SELECT\n' + current.review.extract_sql;
+        query.textContent = 'Database table description: ' + (current.review.description || '(none)') +
+          '\nETRM table description: ' + (current.review.etrm_description || '(not available)') +
+          '\n\n' + (current.review.extract_sql_dialect === 'SAP_NATIVE_SQL' ? 'SAP native extraction SELECT' : 'Oracle extraction SELECT') + '\n' + current.review.extract_sql;
         cell.append(query); row.append(cell); body.append(row);
       }
     }
@@ -363,9 +371,9 @@
         const indexes = (candidate.index_details || []).map(item => item.index_name);
         $('watermark-description').textContent = `${watermarkType(candidate)}; ${candidate.reason}. ` +
           (indexes.length ? `Source index: ${indexes.join(', ')}. ` :
-            current.migration_approach === 'SAP_TABLE' ? 'SAP index metadata is unverified. ' : 'No source index found. ') +
+            ['SAP_TABLE','SAP_VIEW','SAP_REBUILD'].includes(current.migration_approach) ? 'SAP index metadata is unverified. ' : 'No source index found. ') +
           'The selected source column and datatype will be saved for watermark upserts. ' +
-          (current.migration_approach === 'SAP_TABLE' ?
+          (['SAP_TABLE','SAP_VIEW','SAP_REBUILD'].includes(current.migration_approach) ?
             'Choose a field updated on changes; creation dates miss later updates. The ingestion pipeline must handle equal watermark values and SAP initial dates.' : '');
       } else {
         $('watermark-description').textContent = choice === '__FULL__' ?
@@ -554,10 +562,10 @@
     $('lakehouse-retry').addEventListener('click', loadLakehouses);
     function showApproach() {
       $('schema-wrap').classList.toggle('hidden', !['ORACLE_TABLE','ORACLE_VIEW'].includes($('approach').value));
-      $('discovery-provider').disabled = $('approach').value === 'ORACLE_VIEW';
-      if ($('approach').value === 'ORACLE_VIEW') $('discovery-provider').value = 'OPENCODE';
+      $('discovery-provider').disabled = $('approach').value === 'ORACLE_VIEW' || $('approach').value.startsWith('SAP_');
+      if ($('approach').value === 'ORACLE_VIEW' || $('approach').value.startsWith('SAP_')) $('discovery-provider').value = 'OPENCODE';
       $('source-label').textContent = ({ORACLE_TABLE: 'Oracle source table', ORACLE_VIEW: 'Oracle source view',
-        SAP_TABLE: 'SAP source table', SAP_ODP: 'SAP ODP DataSource',
+        SAP_TABLE: 'SAP source table', SAP_VIEW: 'SAP source view', SAP_ODP: 'SAP ODP DataSource',
         SAP_REBUILD: 'SAP DataSource'})[$('approach').value] || 'Source table or DataSource';
     }
     function showConnectionFields() {
@@ -585,7 +593,7 @@
     });
     $('close-connection').addEventListener('click', () => $('connection-section').classList.add('hidden'));
     async function request(path, options) {
-      const response = await fetch(path, options);
+      const response = await fetch(path, {cache: 'no-store', ...options});
       const body = await response.json().catch(error => {
         if (error.name === 'AbortError') throw error;
         return {};
@@ -721,12 +729,17 @@
         const note = document.createElement('p'); note.textContent = warning; note.className = 'muted'; container.append(note);
       }
       for (const table of plan.tables) {
-        const reviewed = (current.review.table_reviews || []).find(r => r.source === `${table.source_schema}.${table.source_table}`);
+        const sourceIdentity = table.source_schema ? `${table.source_schema}.${table.source_table}` : table.source_table;
+        const reviewed = (current.review.table_reviews || []).find(r => r.source === sourceIdentity);
         const details = document.createElement('details');
         const title = document.createElement('summary');
-        title.textContent = `${table.source_schema}.${table.source_table} → ${table.target_table} ` +
+        title.textContent = `${sourceIdentity} → ${table.target_table} ` +
           `(${table.columns.length} columns; key: ${(reviewed?.primary_key || table.primary_key).join(', ') || 'none'})`;
         if (reviewed) {
+          const descriptions = document.createElement('pre');
+          descriptions.textContent = 'Database table description: ' + (reviewed.description || '(none)') +
+            '\nETRM table description: ' + (reviewed.etrm_description || '(not available)');
+          details.append(descriptions);
           const replication = document.createElement('pre');
           replication.textContent = 'Approved replication\n' + JSON.stringify({
             method: reviewed.load_method, write_strategy: reviewed.write_strategy,
@@ -735,21 +748,22 @@
           details.append(replication);
           if (reviewed.extract_sql) {
             const extraction = document.createElement('pre');
-            extraction.textContent = 'Oracle extraction SELECT\n' + reviewed.extract_sql;
+            extraction.textContent = (reviewed.extract_sql_dialect === 'SAP_NATIVE_SQL' ? 'SAP native extraction SELECT' : 'Oracle extraction SELECT') + '\n' + reviewed.extract_sql;
             details.append(extraction);
           }
         }
         const pre = document.createElement('pre');
         pre.textContent = table.columns.map(c => `${c.name}: ${c.source_type} → ${c.fabric_type}` +
           (c.target_name && c.target_name !== c.name ? ` as ${c.target_name}` : '') +
-          (c.source_expression ? `\n  Oracle extraction: ${c.source_expression}` : '') +
+          (c.source_expression ? `\n  Source conversion: ${c.source_expression}` : '') +
+          `\n  Database description: ${c.description || '(none)'}\n  ETRM description: ${c.etrm_description || '(not available)'}` +
           (c.warning ? `\n  Warning: ${c.warning}` : '')).join('\n');
         details.append(title, pre); container.append(details);
       }
       for (const view of plan.views) {
         const details = document.createElement('details');
         const title = document.createElement('summary');
-        const identity = `${view.source_schema}.${view.source_view}`;
+        const identity = view.source_schema ? `${view.source_schema}.${view.source_view}` : view.source_view;
         title.textContent = `${identity} → ${view.target_name}`;
         const dependencies = document.createElement('p'); dependencies.textContent = 'Depends on: ' + view.dependencies.join(', ');
         const source = document.createElement('pre'); source.textContent = 'Oracle source SQL\n' +
@@ -775,7 +789,9 @@
           ['Plan GUID', current.plan_guid], ['Analysis version', current.analysis_version],
           ['Plan version', current.plan_version], ['Provisioning job', current.fabric_job_instance_id],
           ['Provisioning status', current.provisioning_status], ['Batch run', current.batch_run_id],
-          ['Error', current.last_error]];
+          ['Error', current.status === 'FAILED' && current.agent_blocker
+            ? `Agent stopped after ${current.agent_blocker.attempts} attempts: ${current.agent_blocker.blocker}. Required resolution: ${current.agent_blocker.required_resolution}`
+            : current.last_error]];
         $('status').replaceChildren();
         for (const [key, value] of fields) { const dt = document.createElement('dt'); const dd = document.createElement('dd'); dt.textContent = key; dd.textContent = display(value); $('status').append(dt, dd); }
         $('cancel').classList.toggle('hidden', current.status !== 'RUNNING');
@@ -801,19 +817,19 @@
           const targetChange = current.phase === 'WAITING_FOR_TARGET_CHANGE_APPROVAL';
           const runtimeGrid = !analysis && !plan && !mapping && !primaryKey && !deletePolicy && !watermark && !targetChange &&
             Array.isArray(current.review.columns);
-          const canFeedback = plan || (analysis && current.review.route === 'FUNCTION_MODULE');
+          const canFeedback = plan || (analysis && (current.review.route === 'FUNCTION_MODULE' || current.review.discovery_provider === 'OPENCODE'));
           $('review-title').textContent = current.review.correction ? 'Corrected view SQL — review before retry' : targetChange ? 'Existing target structure — change approval' :
-            deletePolicy ? 'Oracle delete handling' : primaryKey ? 'Primary key fields' : mapping ? 'Oracle column mappings' :
-            watermark ? `${current.migration_approach === 'SAP_TABLE' ? 'SAP' : 'Oracle'} watermark` :
+            deletePolicy ? 'Source delete handling' : primaryKey ? 'Primary key fields' : mapping ? 'Source column mappings' :
+            watermark ? `${['SAP_TABLE','SAP_VIEW','SAP_REBUILD'].includes(current.migration_approach) ? 'SAP' : 'Oracle'} watermark` :
             analysis ? 'SAP analysis review' : plan ? 'Fabric plan review' :
-              current.migration_approach === 'ORACLE_VIEW' ? 'Oracle view and base-table plan review' : 'Runtime plan review';
+              ['ORACLE_VIEW','SAP_VIEW','SAP_REBUILD'].includes(current.migration_approach) ? 'View and base-table plan review' : 'Runtime plan review';
           $('review').textContent = JSON.stringify(current.review, null, 2);
           if (current.review.view_base_table) {
             $('review-title').textContent = `Base table ${current.review.base_table_index}/${current.review.base_table_count}: ${current.review.source}`;
             if (current.review.mapping_error || current.review.watermark_error)
               setReviewMessage(current.review.mapping_error || current.review.watermark_error);
           }
-          const viewBundle = current.review.kind === 'oracle_view_bundle';
+          const viewBundle = ['oracle_view_bundle','sap_view_bundle'].includes(current.review.kind);
           $('view-bundle-wrap').classList.toggle('hidden', !viewBundle);
           if (viewBundle) renderOracleViewBundle();
           $('review').classList.toggle('hidden', mapping || primaryKey || runtimeGrid || viewBundle);
@@ -830,6 +846,9 @@
             deletePolicy ? (current.review.view_base_table ? 'Confirm table delete policy' : 'Confirm delete policy and save plan') : primaryKey ? 'Confirm primary key decision' :
             mapping ? 'Confirm column mappings' :
             watermark ? (current.review.delete_policy_required ? 'Confirm replication method' : 'Confirm watermark and save plan') : 'Approve';
+          $('column-mapping-guidance').textContent = current.migration_approach === 'SAP_ODP' ?
+            'Review output column mappings. SAP ODP manages change and delete detection; final schema approval follows.' :
+            'Review each source column and its proposed Fabric type. Confirm these mappings to continue to replication setup.';
           if (mapping) renderColumnGrid();
           else $('column-grid-body').dataset.workflowId = '';
           $('watermark-wrap').classList.toggle('hidden', !watermark);
@@ -841,7 +860,7 @@
           }
           if (primaryKey) {
             $('primary-key-validation-help').textContent = current.review.key_validation_required ?
-              'Oracle will check all source rows for nulls and duplicate key combinations before continuing. Key fields must also remain stable.' :
+              'The source connection will check all rows for nulls and duplicate key combinations before continuing. Key fields must also remain stable.' :
               'Selected fields must be unique together, contain no null values, and remain stable. Source data is not checked for this workflow.';
             renderPrimaryKeyFields();
             if (current.review.primary_key_error) setReviewMessage(current.review.primary_key_error);
@@ -889,7 +908,7 @@
               const indexes = (candidate.index_details || []).map(item => item.index_name);
               const label = `${candidate.column_name} (${watermarkType(candidate)}; ${candidate.reason})` +
                 (indexes.length ? ` — index: ${indexes.join(', ')}` :
-                  current.migration_approach === 'SAP_TABLE' ? ' — index unverified' : ' — no index');
+                  ['SAP_TABLE','SAP_VIEW','SAP_REBUILD'].includes(current.migration_approach) ? ' — index unverified' : ' — no index');
               const option = new Option(label, candidate.column_name);
               option.disabled = !(current.review.primary_key || []).length;
               $('watermark').append(option);
@@ -927,7 +946,7 @@
     $('start-form').addEventListener('submit', async event => {
       event.preventDefault();
       const data = Object.fromEntries(new FormData(event.target).entries());
-      data.discovery_provider = ['ORACLE_TABLE','ORACLE_VIEW'].includes(data.migration_approach) ? $('discovery-provider').value : 'BUILTIN';
+      data.discovery_provider = ['ORACLE_TABLE','ORACLE_VIEW','SAP_TABLE','SAP_VIEW','SAP_ODP','SAP_REBUILD'].includes(data.migration_approach) ? $('discovery-provider').value : 'BUILTIN';
       const allowed = approachesBySource[selectedSourceType()] || [];
       if (!allowed.some(option => option.value === data.migration_approach)) {
         setMessage('Select a source connection and a matching migration type.');

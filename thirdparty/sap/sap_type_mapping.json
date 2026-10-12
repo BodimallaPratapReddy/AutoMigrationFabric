@@ -1,23 +1,37 @@
 {
   "length_bound_types": {
-    "CHAR": "VARCHAR",
-    "NUMC": "VARCHAR",
-    "LANG": "VARCHAR",
-    "CUKY": "VARCHAR"
+    "CHAR": "STRING",
+    "NUMC": "STRING",
+    "LANG": "STRING",
+    "CUKY": "STRING",
+    "UNIT": "STRING",
+    "SSTRING": "STRING",
+    "LCHR": "STRING",
+    "VARC": "STRING"
   },
   "fixed_types": {
-    "CLNT": "VARCHAR(3)",
-    "STRING": "VARCHAR(MAX)",
-    "DATS": "VARCHAR(8)",
-    "TIMS": "VARCHAR(6)",
+    "CLNT": "STRING",
+    "STRING": "STRING",
+    "DATS": "STRING",
+    "TIMS": "STRING",
     "INT1": "SMALLINT",
     "INT2": "SMALLINT",
     "INT4": "INT",
     "INT8": "BIGINT",
-    "FLTP": "FLOAT",
-    "RAWSTRING": "VARBINARY(MAX)"
+    "FLTP": "DOUBLE",
+    "RAWSTRING": "BINARY",
+    "ACCP": "STRING",
+    "PREC": "SMALLINT"
   },
-  "decimal_types": ["DEC", "CURR", "QUAN"],
-  "binary_length_types": ["RAW"],
-  "default_type": "VARCHAR(MAX)"
+  "decimal_types": [
+    "DEC",
+    "CURR",
+    "QUAN"
+  ],
+  "binary_length_types": [
+    "RAW",
+    "LRAW"
+  ],
+  "default_type": "STRING",
+  "binary_target": "BINARY"
 }

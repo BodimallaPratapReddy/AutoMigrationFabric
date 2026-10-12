@@ -37,7 +37,7 @@ class TypeMappingTests(unittest.TestCase):
         self.assertEqual(map_sap_field(SAPFieldMetadata(datatype="CURR", **fields)).fabric_type,
                          "DECIMAL(13,2)")
         self.assertEqual(map_sap_field(SAPFieldMetadata(datatype="CUSTOM", **fields)).fabric_type,
-                         "VARCHAR(MAX)")
+                         "STRING")
 
     def test_oracle_number_precision_and_explicit_types(self) -> None:
         self.assertEqual(map_oracle_column(self.oracle("VARCHAR2(50)", DATA_TYPE="VARCHAR2")).fabric_type,
@@ -166,17 +166,17 @@ class TypeMappingTests(unittest.TestCase):
                       leng=13, decimals=2, checktable="", reftable="", reffield="", ddtext="")
         def mapped(kind):
             return map_sap_field(SAPFieldMetadata(datatype=kind, **fields)).fabric_type
-        self.assertEqual(mapped("CHAR"), "VARCHAR(13)")
-        self.assertEqual(mapped("RAW"), "VARBINARY(13)")
-        self.assertEqual(mapped("STRING"), "VARCHAR(MAX)")
-        self.assertEqual(mapped("DATS"), "VARCHAR(8)")
-        self.assertEqual(mapped("TIMS"), "VARCHAR(6)")
-        self.assertEqual(mapped("FLTP"), "FLOAT")
+        self.assertEqual(mapped("CHAR"), "STRING")
+        self.assertEqual(mapped("RAW"), "BINARY")
+        self.assertEqual(mapped("STRING"), "STRING")
+        self.assertEqual(mapped("DATS"), "STRING")
+        self.assertEqual(mapped("TIMS"), "STRING")
+        self.assertEqual(mapped("FLTP"), "DOUBLE")
 
     def test_sap_client_and_time_have_explicit_text_mappings(self) -> None:
         for name, datatype, length, target in [
-            ("MANDT", "CLNT", 3, "VARCHAR(3)"),
-            ("ABHOV", "TIMS", 6, "VARCHAR(6)"),
+            ("MANDT", "CLNT", 3, "STRING"),
+            ("ABHOV", "TIMS", 6, "STRING"),
         ]:
             with self.subTest(datatype=datatype):
                 field = SAPFieldMetadata(

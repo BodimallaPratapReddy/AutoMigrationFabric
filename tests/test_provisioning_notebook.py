@@ -138,7 +138,7 @@ def test_metadata_commit_resets_only_requested_state_in_same_transaction(reset):
         resume_ingestion=True, reset_watermark=reset, extract_sql='SELECT "ID" FROM "ONT"."T"')
     statements = [sql for sql, _ in db.statements]
     source_update = next((sql, params) for sql, params in db.statements if 'SET ExtractSql = ?' in sql)
-    assert source_update[1] == ('SELECT "ID" FROM "ONT"."T"', 'existing-guid')
+    assert source_update[1] == ('SELECT "ID" FROM "ONT"."T"', None, None, 'existing-guid')
     assert statements.index(source_update[0]) < next(i for i, sql in enumerate(statements) if 'SET IngestionFlag' in sql)
     resets = [sql for sql in statements if 'UPDATE bronze_replication.ReplicationState' in sql]
     assert len(resets) == int(reset)

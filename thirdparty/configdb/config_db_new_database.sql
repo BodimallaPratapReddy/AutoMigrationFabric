@@ -446,6 +446,8 @@ CREATE TABLE bronze_replication.SourceTables
     FabricTableName         nvarchar(256) NOT NULL,
 
     ExtractSql              nvarchar(max) NULL,
+    Description             nvarchar(max) NULL,
+    EtrmDescription         nvarchar(max) NULL,
 
     ProvisioningStatus      varchar(50) NOT NULL
         CONSTRAINT DF_SourceTables_ProvisioningStatus DEFAULT ('PENDING'),
@@ -532,7 +534,7 @@ CREATE TABLE bronze_replication.SourceTableColumns
 
     TargetColumnName        nvarchar(256) NULL,
 
-    Description             nvarchar(1000) NULL,
+    Description             nvarchar(max) NULL,
 
     SourceDataType          varchar(256) NOT NULL,
 
@@ -550,6 +552,7 @@ CREATE TABLE bronze_replication.SourceTableColumns
         CONSTRAINT DF_SourceTableColumns_IsSelected DEFAULT (1),
 
     SourceExpression        nvarchar(max) NULL,
+    EtrmDescription         nvarchar(max) NULL,
 
     TransformationNotes     nvarchar(max) NULL,
 

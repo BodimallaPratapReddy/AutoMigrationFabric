@@ -10,7 +10,7 @@ class OpenCodeOracleViewMigrationWorkflow(OpenCodeOracleMigrationWorkflow):
     async def run(self, input: dict) -> dict:
         self._input = input
         info = workflow.info()
-        self.state = {"workflow_id": info.workflow_id, "migration_approach": "ORACLE_VIEW",
+        self.state = {"workflow_id": info.workflow_id, "migration_approach": input['migration_approach'],
             "source_object_name": input["source_object_name"], "phase": "CREATED", "status": "RUNNING",
             "plan_guid": None, "plan_version": 1, "analysis_version": 1, "waiting_for_user": False}
         try:
@@ -21,14 +21,21 @@ class OpenCodeOracleViewMigrationWorkflow(OpenCodeOracleMigrationWorkflow):
                 "run_id": info.run_id})
             fabric = await self._activity("validate_fabric", input, retry=READ_RETRY)
             self._phase("DISCOVERING_VIEW_DEPENDENCIES")
-            graph = await self._activity("oracle_view_graph", {"input": input}, timeout=300, retry=READ_RETRY)
+            graph = None if getattr(self,'_skip_source_graph',False) else await self._activity(getattr(self,'_view_graph_activity','oracle_view_graph'), {"input": input}, timeout=300, retry=READ_RETRY)
             discovery_input = {**input, "source_view_graph": graph, "plan_guid": guid}
             bundle = await self._discover(discovery_input, fabric["lakehouse_name"], "opencode")
+            if bundle.get('analysis_rejected'):
+                self.state['status']='REJECTED'
+                self._phase('REJECTED')
+                return self.state
             if bundle.get("failure_reason"):
+                if input.get('sap_mcp_discovery') and workflow.patched('sap-agent-failure-diagnostic-v1'):
+                    from temporalio.exceptions import ApplicationError
+                    raise ApplicationError(bundle['failure_reason'][:4000], type='SAPAgentStopped', non_retryable=True)
                 raise ValueError(bundle["failure_reason"])
             self.state["review"] = bundle["review"]
             await self._activity("transition_plan", {"plan_guid": guid, "version": 1,
-                "expected": "DRAFT", "target": "WAITING_PLAN_APPROVAL"})
+                "expected": getattr(self, '_initial_plan_status', 'DRAFT'), "target": "WAITING_PLAN_APPROVAL"})
             choice = await self._review_bundle(bundle)
             if choice["action"] == "reject_plan":
                 await self._activity("transition_plan", {"plan_guid": guid, "version": 1,
@@ -61,6 +68,8 @@ class OpenCodeOracleViewMigrationWorkflow(OpenCodeOracleMigrationWorkflow):
             # contain connection strings or source data.
             detail = (cause.message if getattr(cause, "type", None) == "OpenCodeTransportError"
                       else type(exc).__name__)
+            if getattr(exc, 'type', None) == 'SAPAgentStopped':
+                detail = exc.message
             if getattr(cause, "type", None) == "FabricProvisioningLogicalFailure":
                 report = cause.details[0] if cause.details else {}
                 self.state["provisioning_report"] = report

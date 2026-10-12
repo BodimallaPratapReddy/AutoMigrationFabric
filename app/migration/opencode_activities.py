@@ -51,22 +51,120 @@ def opencode_create(payload: dict) -> dict:
     with _client() as client:
         existing = client.get(_path(sid))
         if existing.status_code == 404:
-            model = os.getenv("OPENCODE_MODEL", "global.anthropic.claude-haiku-5-5")
+            agent = {'SAP_ODP':os.getenv('OPENCODE_SAP_ODP_AGENT','sap-odp-to-fabric'),
+                          'SAP_REBUILD':os.getenv('OPENCODE_SAP_REBUILD_AGENT','sap-datasource-rebuild-to-fabric'),
+                          'SAP_VIEW':os.getenv('OPENCODE_SAP_VIEW_AGENT','sap-view-to-fabric'),
+                          'SAP_TABLE':os.getenv('OPENCODE_SAP_AGENT','sap-table-to-fabric'),
+                          'ORACLE_VIEW':os.getenv('OPENCODE_VIEW_AGENT','oracle-view-to-fabric')}.get(
+                              payload['input']['migration_approach'],os.getenv('OPENCODE_AGENT','oracle-to-fabric'))
+            catalog = _request(client, "GET", "/api/agent")
+            agents = catalog.get("data", [])
+            configured = next((item for item in agents if item.get("id") == agent), None)
+            if configured is None:
+                raise ApplicationError(f"OpenCode agent {agent} is not available", non_retryable=True)
+            model = configured.get("model") or {
+                "id": os.getenv("OPENCODE_MODEL", "global.anthropic.claude-haiku-5-5"),
+                "providerID": os.getenv("OPENCODE_PROVIDER", "amazon-bedrock"),
+                "variant": os.getenv("OPENCODE_VARIANT", "medium")}
             _request(client, "POST", "/api/session", json={"id": sid,
                 "title": f"Fabric discovery: {payload['input']['source_object_name']}",
-                "agent": (os.getenv("OPENCODE_VIEW_AGENT", "oracle-view-to-fabric")
-                          if payload["input"]["migration_approach"] == "ORACLE_VIEW"
-                          else os.getenv("OPENCODE_AGENT", "oracle-to-fabric")),
-                "model": {"id": model, "providerID": os.getenv("OPENCODE_PROVIDER", "amazon-bedrock"),
-                          "variant": os.getenv("OPENCODE_VARIANT", "medium")},
+                "agent": agent,
+                "model": model,
                 "location": {"directory": os.environ["OPENCODE_DIRECTORY"]}})
         elif existing.status_code != 200:
-            raise ApplicationError("Cannot reconcile OpenCode session", non_retryable=True)
+            raise ApplicationError(
+                f"Cannot reconcile OpenCode session (HTTP {existing.status_code}); "
+                "check worker credentials and OpenCode availability",
+                non_retryable=existing.status_code < 500 and existing.status_code not in {408, 429})
     return {"session_id": sid}
 
 
 def _prompt(payload: dict) -> str:
     source = payload["input"]
+    if source.get("sap_mcp_discovery"):
+        from .sap_mcp_prompt import sap_mcp_prompt
+        return sap_mcp_prompt(payload)
+    if source['migration_approach'] in {'SAP_TABLE','SAP_VIEW'}:
+        from .opencode_sap_plan import SAPAgentPlan
+        from thirdparty.sap.extraction import conversion_expression
+        is_view = source['migration_approach']=='SAP_VIEW'
+        metadata = source.get('source_view_graph') if is_view else source.get('source_sap_metadata')
+        if not metadata:
+            raise ValueError('Independently verified SAP source metadata is required')
+        try:
+            bindings = json.loads(os.getenv('OPENCODE_SAP_SOURCE_CONNECTIONS', '{}'))
+        except json.JSONDecodeError:
+            raise ApplicationError('OPENCODE_SAP_SOURCE_CONNECTIONS must be a JSON object', non_retryable=True) from None
+        connection = bindings.get(source['source_connection_name']) if isinstance(bindings, dict) else None
+        if not isinstance(connection, str) or not connection.strip():
+            raise ApplicationError('Configure OPENCODE_SAP_SOURCE_CONNECTIONS for this source', non_retryable=True)
+        if is_view:
+            from .opencode_sap_view_plan import SAPViewBundle
+            schema = SAPViewBundle.model_json_schema()
+            purpose = ('Use sap-to-fabric-view-design and sap-to-fabric-table-design to translate this verified classic SAP database view graph. '
+                'Return all base tables once and every nested view in verified dependency order. '
+                'Use target_table names prefixed with the root target name and an underscore, for isolated base targets. '
+                'The root target_name must match fabric_target_name or source_object_name. '
+                'Each spark_sql is one SELECT (optional WITH), no DDL/comments/semicolons, with explicit schema.table references. '
+                'Preserve original joins, filters, client semantics, output field names and order. '
+                'Translate predicates using the proposed base types: ERDAT is DATE, Boolean flags are BOOLEAN, and long timestamps are exact STRING. '
+                'For EACH base table discover all DDIC fields, Data Elements and Domains; no view projection pruning. '
+                'The UI reviews columns, keys, watermark and deletes separately for every table, then approves the bundle. ')
+        else:
+            schema = SAPAgentPlan.model_json_schema()
+            purpose = 'Use sap-to-fabric-table-design to propose this transparent SAP table migration. '
+        return (purpose +
+            'Use sap-abap-adt for actual source metadata, sap-help for SAP business/delta semantics, '
+            'abap-docs for ABAP SQL syntax, and microsoft-learn for Lakehouse Spark SQL capabilities. '
+            'Documentation lookups are needed only for uncertainties. The supplied source binding and '
+            'DDIC snapshot are authoritative. Use only the mapped sap-abap-adt system '
+            +json.dumps(connection)+'. Different app/MCP connection labels are expected. '
+            'Verify the mapped system host, port and SAP client; hostname/IP aliases may be resolved read-only. '
+            'Do not choose another system or ask the user to approve matching labels. '
+            'Read the complete user-approved sap-to-fabric-datatype-conversion.md reference, '
+            'datatype-mappings.md and extraction-conversions.md from the skill. For EVERY column use '
+            'Data Element, then linked Domain, DDIC documentation, physical datatype/length/scale, '
+            'and lastly name heuristics. Fetch actual element/domain definitions, documentation and '
+            'fixed values on the mapped system, reuse verified lookups, and record per-field semantic '
+            'evidence and decision sources in transformation_notes. Cover every datatype in the framework. '
+            'Propose canonical STRING, BINARY, BOOLEAN, SMALLINT, INT, BIGINT, DOUBLE, DATE, TIMESTAMP or DECIMAL(p,s). '
+            'DATS requires DATE conversion; TIMS requires HH:mm:ss STRING; semantic timestamps require '
+            'TIMESTAMP rather than a physical DECIMAL guess. Ordinary DEC/CURR/QUAN keep precision/scale, '
+            'integers keep range, FLTP keeps double precision, identifiers/NUMC keep exact strings, '
+            'confirmed Boolean domains require a complete value map, and binary needs a verified bytes/Base64 contract. '
+            'Do not use legacy app datatype mappings or VARCHAR/VARBINARY(MAX). Do not infer UTC or temporal '
+            'meaning from DEC dimensions; preserve initial-value policy, fractional precision and currency/unit references. '
+            'Confirmed user policy: DATS exactly 00000000 becomes NULL, and TIMS exactly 000000 becomes '
+            '00:00:00 (midnight), never NULL. Do not ask again; the midnight policy supersedes the earlier '
+            'tentative zero-time-to-NULL request. Do not extend these approvals to blanks, other malformed '
+            'values or zero packed timestamps. Record the deliberate date conversion and external audit requirement. '
+            'SourceType must be DATATYPE(LENGTH,DECIMALS) exactly as supplied. Description comes from DDIC only. '
+            'The app validates every column/key/watermark against live DDIC and saves the extraction SELECT '
+            'from scalar SourceExpression values. The app z_execute_sql endpoint runs native database SQL, '
+            'not ABAP Open SQL. Use direct fields, supported native scalar CASTs, or the exact closed '
+            'conversion templates supplied below, replacing FIELD with the actual quoted source identifier. '
+            'DATS DATE, formatted TIMS STRING, short TIMESTAMP and domain-verified Boolean converters '
+            'are now implemented. Use exact STRING with LONG_TIMESTAMP conversion for seven-digit '
+            'packed timestamps: this is the approved lossless engineering fallback for this migration, '
+            'not Spark TIMESTAMP truncation. Keep original numeric watermark types. '
+            'Use strict rejection for other malformed dates/times; do not invent NULL policies. '
+            'Do not repeat resolved initial-value, converter or seven-digit precision questions. '
+            'Base64 functions outside the templates remain unsupported; direct BINARY requires verified transport. '
+            'Templates: '+json.dumps({k:conversion_expression('FIELD',k) for k in
+                ('DATE','TIME','TIMESTAMP','LONG_TIMESTAMP','STRING','BOOLEAN')})+'. '
+            'The app quotes all source identifiers/aliases and verifies the query with a zero-row read. '
+            'Null SourceExpression means direct extraction. Native SQL does not implicitly filter SAP clients; '
+            'the external pipeline must explicitly enforce the configured client scope along with watermark bounds. '
+            'The UI owns column/key/watermark/delete approvals in later workflow steps. '
+            'Never list those pending approvals in unresolved_decisions and do not ask for them here. '
+            'Unknown non-key nullability is expected: propose nullable=true; the app preserves it as unknown. '
+            'Do not list unknown non-key nullability as unresolved. Ingestion stays disabled until provisioning. '
+            'Native question forms collect material unresolved choices; routine mappings should be resolved from evidence. '
+            'No DDL/DML, writes, file changes or execution approvals. Read-only metadata calls run sequentially; '
+            'do not output credentials or row values. Return exactly one complete fenced JSON object. '
+            'Source request: '+json.dumps({k:source.get(k) for k in ('source_connection_name','source_object_name','fabric_schema_name','fabric_target_name')})+
+            '. Verified source metadata: '+json.dumps(metadata)+
+            '. Schema: '+json.dumps(schema))
     # Explicit binding is required; a registry name is not necessarily a SQLcl name.
     bindings = json.loads(os.getenv("OPENCODE_SOURCE_CONNECTIONS", "{}"))
     connection = bindings.get(source["source_connection_name"])
@@ -109,6 +207,13 @@ def _prompt(payload: dict) -> str:
         "Unknown content or BLOB-content operations/presence predicates that cannot be preserved are genuine "
         "blockers. In views reference mapped path columns and retain verified output aliases; never apply "
         "byte functions or BLOB presence filters to initially NULL path strings as if equivalent. ")
+    description_policy = (
+        "For every base table and column, explicitly read Oracle dictionary comments and return them "
+        "unchanged in description, with null for absent comments. Perform the matching standard-table "
+        "ETRM lookup and put the detailed table/column description in etrm_description separately; "
+        "null if unavailable. Do not substitute inferred meanings, URLs or ETRM text for database comments. "
+        "Return both fields explicitly. Fabric table and column comments use only database descriptions. ")
+    numeric_policy += description_policy
     if source["migration_approach"] == "ORACLE_VIEW":
         from .opencode_view_plan import AgentViewBundle
         return ("Use oracle-to-fabric-view-design to translate the verified Oracle view graph below. "
@@ -173,15 +278,38 @@ def opencode_prompt(payload: dict) -> None:
     # NO_RETRY at the workflow boundary: an ambiguous POST must be reconciled, not resent.
     mid = "msg_" + hashlib.sha256(
         f"{payload['session_id']}:{payload.get('revision', 0)}".encode()).hexdigest()[:26]
-    text = _prompt(payload)
+    text = (_prompt(payload) if not payload.get('delivery_continuation') else
+        'Continue the approved SAP rebuild multipart delivery in this same session. '
+        'All source evidence, datatype rules and reviewer decisions remain unchanged. '
+        'Return exactly one next SAP_REBUILD_TABLE_PART or the final SAP_REBUILD_COMPLETE '
+        'for bundle_id '+payload['input']['plan_guid']+'. Do not truncate columns or rediscover '
+        'completed facts. Delivery parts are not approvals or ConfigDB writes.')
     if payload["input"].get("view_correction"):
         context = payload["input"]["view_correction"]
-        text += ("\nThis is a bounded SQL-only notebook repair in the SAME planning session. "
+        if payload['input']['migration_approach']=='SAP_REBUILD':
+            from .sap_bundle_storage import expand_bundle
+            from .sap_mcp_plan import mapped_destination
+            previous=expand_bundle(context['previous'])
+            compact_context={k:v for k,v in context.items() if k!='previous'}
+            compact_context['previous_views']=previous['review']['agent_plan']['views']
+            compact_context['source_view_definitions']=previous['review']['source_view_definitions']
+            compact_context['base_schemas']={t['table']['source_table_name']:{
+                'target':t['table']['fabric_lakehouse_schema']+'.'+t['table']['fabric_table_name'],
+                'columns':{c['target_column_name'] or c['column_name']:c['fabric_data_type'] for c in t['columns']}}
+                for t in previous['tables']}
+            text += ('\nFor this SAP rebuild correction return ONLY {kind:"SAP_REBUILD_VIEW_REPAIR", '
+                'bundle_id:'+json.dumps(payload['input']['plan_guid'])+',destination:'+json.dumps(mapped_destination(payload['input']))+
+                ',views:[all prior SAPView entries with only eligible spark_sql/translation_notes corrected]}. '
+                'The app supplies the frozen base metadata/plans and rejects any destination, dependency, '
+                'output identity or successful-view change. Do not repeat large base-table manifests. '
+                'Preserve the approved fail-closed guards. No execution is authorized. Repair context: '+json.dumps(compact_context))
+        else:
+            text += ("\nThis is a bounded SQL-only notebook repair in the SAME planning session. "
                  "Return the entire JSON bundle. Copy all base table proposals EXACTLY from the previous "
                  "agent_plan; do not reprofile or revise mappings, extraction expressions, table schemas, "
                  "destinations, dependencies or output column identities. Only revise spark_sql and "
                  "translation_notes for failed/blocked eligible views. Preserve successful view SQL. "
-                 "Use the structured notebook error and original Oracle definitions to correct the SQL; "
+                 "Use the structured notebook error and original source definitions to correct the SQL; "
                  "never hide an error by dropping columns or approximating semantics. If a schema change "
                  "is essential, report a blocker using the existing native form instead. No execution is "
                  "authorized by this prompt. Repair context: " + json.dumps(context))
@@ -211,16 +339,24 @@ def opencode_prompt(payload: dict) -> None:
 def opencode_poll(payload: dict) -> dict:
     path = _path(payload["session_id"])
     with _client() as client:
+        messages = None
+        extra = {}
+        if payload.get('sap_tool_retry_guard'):
+            from .sap_tool_retries import tool_attempts
+            messages = _request(client, 'GET', path + '/message').get('data', [])
+            extra = {'tool_attempts': tool_attempts(messages)}
         forms = _request(client, "GET", path + "/form").get("data", [])
         if forms:
             f = forms[0]
-            return {"status": "FORM", "request": {k: f[k] for k in ("id", "title", "fields") if k in f}}
+            return {"status": "FORM", "request": {k: f[k] for k in ("id", "title", "fields") if k in f}, **extra}
         permissions = _request(client, "GET", path + "/permission").get("data", [])
         if permissions:
             p = permissions[0]
             return {"status": "PERMISSION", "request": {
-                k: p[k] for k in ("id", "action", "resources", "message") if k in p}}
-        messages = _request(client, "GET", path + "/message").get("data", [])
+                k: p[k] for k in ("id", "action", "resources", "message") if k in p}, **extra}
+        if messages is None:
+            messages = _request(client, "GET", path + "/message").get("data", [])
+    attempts = extra.get('tool_attempts', [])
     # v2 returns newest first. Do not treat an old completed turn as the new result.
     if not messages or messages[0].get("type") != "idle":
         progress = []
@@ -235,7 +371,8 @@ def opencode_poll(payload: dict) -> dict:
                                            "status": state.get("status", "running")}]:
                         progress.append({"tool": str(call.get("tool", "tool"))[:120],
                                          "status": str(call.get("status", "running"))[:40]})
-        return {"status": "RUNNING", **({"progress": progress[:8]} if progress else {})}
+        return {"status": "RUNNING", **({"progress": progress[:8]} if progress else {}),
+                **({'tool_attempts': attempts} if attempts else {})}
     if messages[0].get("outcome") != "succeeded":
         return {"status": "FAILED", "error": "OpenCode turn failed; inspect the agent session"}
     for message in messages[1:]:
@@ -245,7 +382,8 @@ def opencode_poll(payload: dict) -> dict:
             text = "\n".join(c["text"] for c in message.get("content", []) if c.get("type") == "text")
             if len(text.encode()) > 256_000:
                 return {"status": "FAILED", "error": "Agent plan exceeds 256 KB"}
-            return {"status": "COMPLETED", "text": text}
+            return {"status": "COMPLETED", "text": text,
+                    **({'tool_attempts': attempts} if attempts else {})}
     return {"status": "FAILED", "error": "Agent stopped without a final plan"}
 
 
@@ -262,8 +400,45 @@ def opencode_reply(payload: dict) -> None:
 @activity.defn
 def opencode_validate(payload: dict) -> dict:
     try:
-        if payload["input"]["migration_approach"] == "ORACLE_VIEW":
-            from .opencode_view_plan import adapt_view_bundle
+        if payload["input"].get("sap_mcp_discovery"):
+            from .opencode_sap_view_plan import parse_json
+            from .sap_agent_limits import blocked_result
+            from .sap_mcp_plan import mapped_destination
+            try:
+                terminal = parse_json(payload['text'])
+            except (ValueError, TypeError):
+                terminal = None
+            if isinstance(terminal, dict) and terminal.get('kind') == 'SAP_AGENT_BLOCKED':
+                return blocked_result(terminal, mapped_destination(payload['input']))
+            from .sap_mcp_delivery import handle_rebuild_delivery
+            delivery=handle_rebuild_delivery(payload)
+            if delivery and 'agent_continuation' in delivery:
+                return delivery
+            if delivery:
+                payload={**payload,'text':delivery['text']}
+            from .sap_mcp_plan import adapt_mcp_sap, collect_mcp_evidence
+            return adapt_mcp_sap(payload,collect_mcp_evidence(payload["session_id"]))
+        if payload['input']['migration_approach']=='SAP_ODP':
+            from .opencode_sap_odp_plan import adapt_sap_odp_plan
+            result=adapt_sap_odp_plan(payload['text'],payload['input'],payload['lakehouse_name'])
+            from .oracle_view_targets import check_oracle_view_targets
+            check_oracle_view_targets({'bundle':result,'plan_guid':payload['input']['plan_guid']})
+            return result
+        if payload['input']['migration_approach']=='SAP_TABLE':
+            from .opencode_sap_plan import adapt_sap_plan
+            from .source_connections import sap_client
+            result = adapt_sap_plan(payload['text'],payload['input'],payload['lakehouse_name'])
+            with sap_client(payload['input']['source_connection_name']) as client:
+                check = client.execute_sql_query(result['review']['extract_sql'] + ' WHERE 1 = 0', max_rows=1)
+            if not check.success or check.rows or check.truncated:
+                raise ValueError('SAP extraction SELECT did not pass its zero-row execution check')
+            result['review']['extract_sql_validation'] = 'ZERO_ROW_EXECUTION_PASSED'
+            return result
+        if payload["input"]["migration_approach"] in {"ORACLE_VIEW", "SAP_VIEW", "SAP_REBUILD"}:
+            if payload["input"]["migration_approach"] in {"SAP_VIEW","SAP_REBUILD"}:
+                from .opencode_sap_view_plan import adapt_sap_view_bundle as adapt_view_bundle
+            else:
+                from .opencode_view_plan import adapt_view_bundle
             from .oracle_view_targets import check_oracle_view_targets
             result = adapt_view_bundle(payload["text"], payload["input"], payload["lakehouse_name"])
             if payload["input"].get("view_correction"):
@@ -283,11 +458,40 @@ def opencode_validate(payload: dict) -> dict:
                     if field in previous["review"]:
                         result["review"][field] = deepcopy(previous["review"][field])
                 validate_correction(context["previous"], result, context["eligible"])
+            if payload["input"]["migration_approach"] in {"SAP_VIEW","SAP_REBUILD"}:
+                from .source_connections import sap_client
+                with sap_client(payload["input"]["source_connection_name"]) as client:
+                    for review in result["review"]["table_reviews"]:
+                        check = client.execute_sql_query(review["extract_sql"] + " WHERE 1 = 0", max_rows=1)
+                        if not check.success or check.rows or check.truncated:
+                            raise ValueError("SAP base-table extraction did not pass its zero-row execution check")
+                        review["extract_sql_validation"] = "ZERO_ROW_EXECUTION_PASSED"
             check_oracle_view_targets({"bundle": result, "plan_guid": payload["input"]["plan_guid"]})
             return result
-        return adapt_plan(payload["text"], payload["input"], payload["lakehouse_name"])
-    except json.JSONDecodeError:
-        return {"validation_error": "The agent returned prose or invalid JSON. Request a complete JSON plan.",
+        result = adapt_plan(payload["text"], payload["input"], payload["lakehouse_name"])
+        from .source_connections import oracle_client
+        source = payload["input"]
+        try:
+            oracle = oracle_client(source["source_connection_name"])
+            columns = oracle.get_table_schema(source["source_schema_name"], source["source_object_name"])
+            description = oracle.get_table_description(source["source_schema_name"], source["source_object_name"])
+        except Exception as exc:
+            return {"validation_error": f"Oracle database comment verification did not complete ({type(exc).__name__}); retry discovery.",
+                    "error_type": "OracleCommentVerificationError"}
+        comments = {column.column_name: column.description for column in columns}
+        if set(comments) != {c["column_name"] for c in result["table_plan"]["columns"]}:
+            raise ValueError("Source columns changed during database comment verification; rediscover the table")
+        result["table_plan"]["table"]["description"] = description
+        result["review"]["description"] = description
+        result["review"]["agent_plan"]["description"] = description
+        for entries, key in ((result["table_plan"]["columns"], "column_name"),
+                             (result["review"]["columns"], "name"),
+                             (result["review"]["agent_plan"]["columns"], "name")):
+            for column in entries:
+                column["description"] = comments[column[key]]
+        return result
+    except json.JSONDecodeError as exc:
+        return {"validation_error": f"Invalid JSON ({exc.msg}, line {exc.lineno}, column {exc.colno}). Return one complete JSON plan.",
                 "error_type": "JSONDecodeError"}
     except ValidationError as exc:
         # Field paths/types only: never echo Pydantic's raw input values.

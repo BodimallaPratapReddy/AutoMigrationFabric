@@ -55,7 +55,7 @@ def test_options_and_start_use_connection_type(monkeypatch):
         assert options.status_code == 200
         assert [item["value"] for item in options.json()["ORACLE"]] == ["ORACLE_TABLE", "ORACLE_VIEW"]
         assert [item["value"] for item in options.json()["SAP_ECC"]] == [
-            "SAP_TABLE", "SAP_ODP", "SAP_REBUILD"]
+            "SAP_TABLE", "SAP_VIEW", "SAP_ODP", "SAP_REBUILD"]
         mismatch = client.post("/migrations/sap-table", json=_input("Oracle Local", "SAP_TABLE"))
         assert mismatch.status_code == 422
         assert temporal.started == []
@@ -78,6 +78,19 @@ def test_options_and_start_use_connection_type(monkeypatch):
         assert view.status_code == 200
         assert len(temporal.started) == 2
         assert temporal.started[-1][0][0].__qualname__.startswith("OpenCodeOracleViewReplicationWorkflow")
+        sap_view = client.post("/migrations/sap-view", json={
+            **_input("SAP Local", "SAP_VIEW"), "discovery_provider": "OPENCODE",
+            "source_object_name": "ZTEST_VIEW"})
+        assert sap_view.status_code == 200
+        assert len(temporal.started) == 3
+        assert temporal.started[-1][0][0].__qualname__.startswith("OpenCodeMCPSAPViewMigrationWorkflow")
+        for approach,route,expected in [('SAP_ODP','sap-odp','OpenCodeSAPODPMigrationWorkflow'),
+                                        ('SAP_REBUILD','sap-rebuild','OpenCodeSAPDataSourceRebuildWorkflow')]:
+            started=client.post('/migrations/'+route,json={**_input('SAP Local',approach),
+                'discovery_provider':'OPENCODE','source_object_name':'0COMP_CODE_ATTR'})
+            assert started.status_code==200
+            assert temporal.started[-1][0][0].__qualname__.startswith(expected)
+            assert temporal.started[-1][0][1]['fabric_target_name']=='DS_0COMP_CODE_ATTR'
     finally:
         app.dependency_overrides.pop(api.get_temporal_client, None)
 

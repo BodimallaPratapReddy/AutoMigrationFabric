@@ -28,7 +28,7 @@ class SAPExtractorAnalysisRequest(StrictModel):
 
 class IdentifiedSAPObject(StrictModel):
     name: str
-    object_type: Literal["TRANSPARENT_TABLE", "DB_VIEW"]
+    object_type: Literal["TRANSPARENT_TABLE", "DB_VIEW", "CDS_VIEW"]
     role: str
     required: bool
     evidence: list[str]

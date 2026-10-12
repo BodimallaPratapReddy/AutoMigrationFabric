@@ -150,6 +150,8 @@ class SourceTableCreate(DBRow):
     fabric_table_name: str = Field(alias="FabricTableName", min_length=1)
     source_schema_name: str | None = Field(default=None, alias="SourceSchemaName")
     extract_sql: str | None = Field(default=None, alias="ExtractSql", min_length=1)
+    description: str | None = Field(default=None, alias="Description")
+    etrm_description: str | None = Field(default=None, alias="EtrmDescription")
     parent_source_object_guid: UUID | None = Field(default=None, alias="ParentSourceObjectGUID")
     parent_source_index: int | None = Field(default=None, ge=0, exclude=True)
     data_source_type: str | None = Field(default=None, alias="DataSourceType")
@@ -175,6 +177,7 @@ class SourceTableColumnCreate(DBRow):
     fabric_data_type: str = Field(alias="FabricDataType", min_length=1)
     target_column_name: str | None = Field(default=None, alias="TargetColumnName")
     description: str | None = Field(default=None, alias="Description")
+    etrm_description: str | None = Field(default=None, alias="EtrmDescription")
     is_primary_key: bool = Field(default=False, alias="IsPrimaryKey")
     is_nullable: bool | None = Field(default=None, alias="IsNullable")
     is_watermark_candidate: bool = Field(default=False, alias="IsWatermarkCandidate")
@@ -199,7 +202,7 @@ class SourceTableColumnRecord(SourceTableColumnCreate):
 
 class ReplicationConfigCreate(DBRow):
     incremental_method: Literal["FULL", "WATERMARK", "SAP_ODP_DELTA", "CDC"] = Field(default="FULL", alias="IncrementalMethod")
-    write_strategy: Literal["APPEND", "UPSERT", "SCD1", "SCD2", "REPLACE"] = Field(default="APPEND", alias="WriteStrategy")
+    write_strategy: Literal["APPEND", "UPSERT", "SCD1", "SCD2", "REPLACE", "ODP_MANAGED"] = Field(default="APPEND", alias="WriteStrategy")
     watermark_column: str | None = Field(default=None, alias="WatermarkColumn")
     watermark_column_data_type: str | None = Field(default=None, alias="WatermarkColumnDataType")
     watermark_index_name: str | None = Field(default=None, alias="WatermarkIndexName")
@@ -217,6 +220,8 @@ class ReplicationConfigCreate(DBRow):
 
     @model_validator(mode="after")
     def check_strategy(self) -> "ReplicationConfigCreate":
+        if self.write_strategy == 'ODP_MANAGED' and self.incremental_method not in {'SAP_ODP_DELTA','FULL'}:
+            raise ValueError('ODP-managed loading cannot use a table watermark or CDC configuration')
         if self.incremental_method == "WATERMARK" and not (self.watermark_column and self.watermark_column_data_type):
             raise ValueError("WATERMARK requires column and datatype")
         if self.watermark_index_name and not self.watermark_column:
@@ -263,8 +268,16 @@ class SourceTablePlan(DBRow):
         names = [column.column_name.upper() for column in self.columns]
         if len(set(positions)) != len(positions) or len(set(names)) != len(names):
             raise ValueError("table column positions and names must be unique")
+        if self.replication.write_strategy == 'ODP_MANAGED':
+            if (self.table.source_system_type != 'SAP_ECC' or self.table.source_object_type != 'SAP_DATASOURCE'
+                    or self.table.data_source_type != 'ODP' or self.table.extract_sql is not None
+                    or self.replication.watermark_column or self.replication.delete_policy is not None):
+                raise ValueError('ODP-managed plans require an ODP DataSource without table SQL/watermark/delete policy')
         if self.table.extract_sql is not None:
-            from thirdparty.oracle.extraction import build_extract_sql
+            if self.table.source_system_type == 'SAP_ECC':
+                from thirdparty.sap.extraction import build_extract_sql
+            else:
+                from thirdparty.oracle.extraction import build_extract_sql
             expected = build_extract_sql(self.table.model_dump(), [c.model_dump() for c in self.columns])
             if self.table.extract_sql != expected:
                 raise ValueError("ExtractSql differs from approved source expressions")
@@ -446,8 +459,12 @@ def _runtime_fingerprint(plan: ApprovedRuntimePlan) -> str:
     # Adding nullable policy fields must not change fingerprints for older plans
     # replaying a persistence activity that already committed.
     for table in payload["tables"]:
-        if table["table"].get("extract_sql") is None:
-            table["table"].pop("extract_sql", None)
+        for name in ("extract_sql", "description", "etrm_description"):
+            if table["table"].get(name) is None:
+                table["table"].pop(name, None)
+        for column in table["columns"]:
+            if column.get("etrm_description") is None:
+                column.pop("etrm_description", None)
         for name in ("delete_policy", "key_validation"):
             if table["replication"].get(name) is None:
                 table["replication"].pop(name, None)
@@ -1132,7 +1149,7 @@ class ConfigDBRepository(ConfigDB):
         "ApplicationComponent, Delta, ReplicationMethod, ObjectRole, FabricWorkspaceName, "
         "FabricWorkspaceId, FabricLakehouseName, FabricLakehouseId, FabricLakehouseSchema, "
         "FabricTableName, ProvisioningStatus, ProvisioningError, LastProvisioningRunId, "
-        "ProvisionedTimestamp, IsActive, ExtractSql"
+        "ProvisionedTimestamp, IsActive, ExtractSql, Description, EtrmDescription"
     )
 
     def get_source_table(self, source_table_guid: UUID) -> SourceTableRecord | None:
@@ -1206,7 +1223,7 @@ class ConfigDBRepository(ConfigDB):
             with connection.cursor() as cursor:
                 cursor.execute(
                     "SELECT SourceTableColumnGUID, GUID, Sno, ColumnName, TargetColumnName, "
-                    "Description, SourceDataType, FabricDataType, IsPrimaryKey, IsNullable, "
+                    "Description, EtrmDescription, SourceDataType, FabricDataType, IsPrimaryKey, IsNullable, "
                     "IsWatermarkCandidate, IsSelected, SourceExpression, TransformationNotes "
                     "FROM bronze_replication.SourceTableColumns WHERE GUID = ? ORDER BY Sno",
                     (str(source_table_guid),))
