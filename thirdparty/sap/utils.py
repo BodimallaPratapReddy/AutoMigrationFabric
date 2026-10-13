@@ -585,7 +585,10 @@ class SAPClient:
             json={"sql": sql, "max_rows": max_rows},
         )
         response.raise_for_status()
-        return SAPSQLQueryResponse.model_validate(response.json())
+        result = response.json()
+        if isinstance(result, dict) and result.get('success') is False:
+            raise ValueError('SAP SQL endpoint rejected the query; inspect the SAP endpoint log')
+        return SAPSQLQueryResponse.model_validate(result)
 
     def get_datasource_details(
         self, datasource_name: str

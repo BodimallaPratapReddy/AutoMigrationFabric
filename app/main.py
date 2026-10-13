@@ -1,11 +1,13 @@
 from fastapi import FastAPI
 from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from pathlib import Path
 
 from app.migration.api import router as migration_router
 from app.migration.connections_api import router as connections_router
 from app.migration.workspaces_api import router as workspaces_router
+from app.migration.workspace_api import router as workspace_router
 import truststore
 truststore.inject_into_ssl()
 
@@ -17,6 +19,8 @@ app = FastAPI(title="Fabric API")
 app.include_router(migration_router)
 app.include_router(connections_router)
 app.include_router(workspaces_router)
+app.include_router(workspace_router)
+app.mount("/static", StaticFiles(directory=Path(__file__).with_name("static")), name="static")
 
 
 @app.get("/health", tags=["health"])

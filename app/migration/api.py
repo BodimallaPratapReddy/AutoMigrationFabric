@@ -2,6 +2,7 @@
 
 import os
 import asyncio
+import re
 from typing import Annotated
 from uuid import UUID, uuid4
 
@@ -18,6 +19,14 @@ from .migration_types import MigrationTypeOption, load_migration_types
 from .mapping_types import normalize_fabric_type
 from .target_review import allowed_target_decisions
 from .worker import TASK_QUEUE
+from .agent_forms import validate_reply
+from .contracts import AgentReply, AgentFeedback
+from .workflow_opencode import OpenCodeOracleMigrationWorkflow
+from .workflow_view_replication import OpenCodeOracleViewReplicationWorkflow
+from .workflow_sap_opencode import OpenCodeSAPTableMigrationWorkflow
+from .workflow_sap_view import OpenCodeSAPViewMigrationWorkflow
+from .workflow_sap_mcp import OpenCodeMCPSAPTableMigrationWorkflow, OpenCodeMCPSAPViewMigrationWorkflow
+from .workflow_sap_datasource import OpenCodeSAPODPMigrationWorkflow, OpenCodeSAPDataSourceRebuildWorkflow
 from thirdparty.configdb.repository import ConfigDBRepository
 from thirdparty.configdb.utils import ConfigDB
 from .workflows import (
@@ -55,8 +64,13 @@ async def _start(client: Client, request: MigrationInput, expected: str,
                  workflow_class: type, prefix: str) -> StartedMigration:
     if request.migration_approach != expected:
         raise HTTPException(422, f"migration_approach must be {expected}")
+    if expected.startswith("SAP_") and request.discovery_provider != "OPENCODE":
+        raise HTTPException(422,"New SAP migrations require OpenCode MCP discovery")
     if request.replication_pipeline_id is not None:
         raise HTTPException(422, "Replication pipelines are scheduled separately from migration")
+    if (request.discovery_provider == 'OPENCODE' and expected in {'SAP_ODP','SAP_REBUILD'}
+            and not request.fabric_target_name):
+        request = request.model_copy(update={'fabric_target_name':'DS_'+re.sub(r'[^A-Za-z0-9_]','_',request.source_object_name)})
     try:
         options = load_migration_types()
     except (OSError, ValueError) as exc:
@@ -86,28 +100,44 @@ async def _start(client: Client, request: MigrationInput, expected: str,
 
 @router.post("/oracle-table", response_model=StartedMigration)
 async def start_oracle(request: MigrationInput, client: TemporalClient) -> StartedMigration:
-    return await _start(client, request, "ORACLE_TABLE", OracleTableMigrationWorkflow, "oracle-table")
+    workflow_class = (OpenCodeOracleMigrationWorkflow if request.discovery_provider == "OPENCODE"
+                      else OracleTableMigrationWorkflow)
+    return await _start(client, request, "ORACLE_TABLE", workflow_class, "oracle-table")
 
 
 @router.post("/sap-table", response_model=StartedMigration)
 async def start_sap_table(request: MigrationInput, client: TemporalClient) -> StartedMigration:
-    return await _start(client, request, "SAP_TABLE", SAPTableMigrationWorkflow, "sap-table")
+    workflow_class = OpenCodeMCPSAPTableMigrationWorkflow if request.discovery_provider == "OPENCODE" else SAPTableMigrationWorkflow
+    return await _start(client, request, "SAP_TABLE", workflow_class, "sap-table")
+
+
+@router.post("/oracle-view", response_model=StartedMigration)
+async def start_oracle_view(request: MigrationInput, client: TemporalClient) -> StartedMigration:
+    return await _start(client, request, "ORACLE_VIEW", OpenCodeOracleViewReplicationWorkflow, "oracle-view")
+
+
+@router.post("/sap-view", response_model=StartedMigration)
+async def start_sap_view(request: MigrationInput, client: TemporalClient) -> StartedMigration:
+    return await _start(client, request, "SAP_VIEW", OpenCodeMCPSAPViewMigrationWorkflow, "sap-view")
 
 
 @router.post("/sap-odp", response_model=StartedMigration)
 async def start_sap_odp(request: MigrationInput, client: TemporalClient) -> StartedMigration:
-    return await _start(client, request, "SAP_ODP", SAPODPDataSourceMigrationWorkflow, "sap-odp")
+    workflow_class = OpenCodeSAPODPMigrationWorkflow if request.discovery_provider == "OPENCODE" else SAPODPDataSourceMigrationWorkflow
+    return await _start(client, request, "SAP_ODP", workflow_class, "sap-odp")
 
 
 @router.post("/sap-rebuild", response_model=StartedMigration)
 async def start_sap_rebuild(request: MigrationInput, client: TemporalClient) -> StartedMigration:
-    return await _start(client, request, "SAP_REBUILD", SAPDataSourceRebuildWorkflow, "sap-rebuild")
+    workflow_class = OpenCodeSAPDataSourceRebuildWorkflow if request.discovery_provider == "OPENCODE" else SAPDataSourceRebuildWorkflow
+    return await _start(client, request, "SAP_REBUILD", workflow_class, "sap-rebuild")
 
 
 async def _state(client: Client, workflow_id: str) -> MigrationState:
     try:
         handle = client.get_workflow_handle(workflow_id)
         description = await handle.describe()
+        handle = client.get_workflow_handle(workflow_id, run_id=description.run_id)
         if description.status == WorkflowExecutionStatus.COMPLETED:
             result = await handle.result()
         elif description.status == WorkflowExecutionStatus.RUNNING:
@@ -123,6 +153,11 @@ async def _state(client: Client, workflow_id: str) -> MigrationState:
         if exc.status == RPCStatusCode.RESOURCE_EXHAUSTED:
             raise HTTPException(503, f"Workflow is waiting for a worker on the {TASK_QUEUE} task queue") from exc
         if exc.status == RPCStatusCode.FAILED_PRECONDITION:
+            # A reset/replaying worker may temporarily reject a query. Recheck
+            # the current execution before hiding a still-running workflow.
+            latest = await client.get_workflow_handle(workflow_id).describe()
+            if latest.status == WorkflowExecutionStatus.RUNNING:
+                raise HTTPException(503, "Workflow status is temporarily unavailable; retrying") from exc
             raise HTTPException(410, "Workflow closed before a worker processed it") from exc
         raise HTTPException(503, "Workflow status is temporarily unavailable") from exc
     except Exception as exc:
@@ -200,7 +235,8 @@ async def _command(client: Client, workflow_id: str, action: str,
         raise HTTPException(409, f"{action} is unavailable in {state.phase}")
     if action in {"approve_primary_key", "edit_primary_key"}:
         review = state.review or {}
-        if (state.migration_approach not in {"ORACLE_TABLE", "SAP_TABLE"}
+        if (state.migration_approach not in {"ORACLE_TABLE", "SAP_TABLE"} and not
+                (state.migration_approach in {"ORACLE_VIEW", "SAP_VIEW", "SAP_REBUILD"} and review.get("view_base_table"))
                 or (review.get("primary_key_source") == "DATABASE"
                     and (review.get("key_validation") or {}).get("valid") is not False)
                 or (review.get("primary_key") and not review.get("primary_key_source"))):
@@ -212,7 +248,7 @@ async def _command(client: Client, workflow_id: str, action: str,
             except ValueError as exc:
                 raise HTTPException(422, str(exc)) from exc
     if (action == "analysis_feedback" and state.review
-            and state.review.get("route") != "FUNCTION_MODULE"):
+            and state.review.get("route") != "FUNCTION_MODULE" and state.review.get("discovery_provider") != "OPENCODE"):
         raise HTTPException(409, "Analysis feedback is supported for function module routes")
     if action == "approve_columns":
         review_columns = (state.review or {}).get("columns", [])
@@ -226,12 +262,17 @@ async def _command(client: Client, workflow_id: str, action: str,
                        for item in columns]
         except ValueError as exc:
             raise HTTPException(422, str(exc)) from exc
+        if (state.review or {}).get("discovery_provider") == "OPENCODE":
+            proposed = {item["name"]: item["fabric_type"] for item in review_columns}
+            if any(item["fabric_type"] != proposed[item["name"]] for item in columns):
+                raise HTTPException(422, "Mappings must come from the agent plan; reject and revise the plan")
         if any(item.get("supported") is False for item in review_columns) and not acknowledge_unsupported:
             raise HTTPException(422, "Acknowledge unsupported Oracle mappings before approval")
     if watermark_column is not None:
         candidates = (state.review or {}).get("watermark_candidates", [])
         if (action not in {"approve_plan", "approve_watermark"}
-                or state.migration_approach not in {"ORACLE_TABLE", "SAP_TABLE"}
+                or (state.migration_approach not in {"ORACLE_TABLE", "SAP_TABLE"} and not
+                    (state.migration_approach in {"ORACLE_VIEW", "SAP_VIEW", "SAP_REBUILD"} and (state.review or {}).get("view_base_table")))
                 or watermark_column not in {item["column_name"] for item in candidates}):
             raise HTTPException(422, "Select a discovered date or timestamp watermark column")
         if not state.review.get("primary_key"):
@@ -249,8 +290,10 @@ async def _command(client: Client, workflow_id: str, action: str,
             raise HTTPException(422, "Choose an action valid for this target")
     if action == "approve_delete_policy":
         review = state.review or {}
-        if state.migration_approach != "ORACLE_TABLE":
-            raise HTTPException(409, "Delete policy approval is supported for Oracle tables")
+        if state.migration_approach != "ORACLE_TABLE" and not (
+                state.migration_approach in {"ORACLE_VIEW", "SAP_VIEW", "SAP_REBUILD"} and review.get("view_base_table")) and not (
+                state.migration_approach == "SAP_TABLE" and review.get("delete_policy_required")):
+            raise HTTPException(409, "Workflow does not support table delete-policy approval")
         try:
             delete_policy = validate_delete_policy(delete_policy,
                 [item["name"] for item in review.get("columns", [])],
@@ -261,6 +304,16 @@ async def _command(client: Client, workflow_id: str, action: str,
             raise HTTPException(422, str(exc)) from exc
     command = {"action": action, "actor": actor, "message": message,
                "watermark_column": watermark_column, "columns": columns}
+    # Store the exact user-facing review with the decision, rather than reusing
+    # the current (possibly different) review when opening history later.
+    if action.startswith(('approve_', 'reject_')):
+        review = state.review or {}
+        command['review_snapshot'] = {key: review[key] for key in (
+            'source', 'columns', 'primary_key', 'selected_watermark', 'load_method',
+            'write_strategy', 'delete_policy', 'key_validation', 'warnings',
+            'base_table_index', 'base_table_count', 'agent_plan') if key in review}
+        command['review_snapshot']['phase'] = state.phase
+        command['review_snapshot']['source_object_name'] = state.source_object_name
     if target_decision is not None:
         command["decision"] = target_decision
     if primary_key_columns is not None:
@@ -268,6 +321,33 @@ async def _command(client: Client, workflow_id: str, action: str,
     if delete_policy is not None:
         command["delete_policy"] = delete_policy
     await client.get_workflow_handle(workflow_id).signal("command", command)
+    return {"accepted": True}
+
+
+@router.post("/{workflow_id}/agent-reply")
+async def reply_to_agent(workflow_id: str, reply: AgentReply, client: TemporalClient) -> dict:
+    state = await _state(client, workflow_id)
+    if state.status != "RUNNING" or state.phase != "WAITING_FOR_AGENT_INPUT" or not state.agent_request:
+        raise HTTPException(409, "Workflow is not waiting for an agent answer")
+    payload = {"action": "agent_reply", "actor": reply.approved_by,
+               "request_id": reply.request_id, "answer": reply.answer, "decision": reply.decision,
+               "review_snapshot": {"source_object_name": state.source_object_name,
+                                   "phase": state.phase, "request": state.agent_request}}
+    try:
+        validate_reply(state.agent_request, payload)
+    except (ValueError, TypeError) as exc:
+        raise HTTPException(422, str(exc)) from exc
+    await client.get_workflow_handle(workflow_id).signal("command", payload)
+    return {"accepted": True}
+
+
+@router.post("/{workflow_id}/agent-feedback")
+async def agent_feedback(workflow_id: str, feedback: AgentFeedback, client: TemporalClient) -> dict:
+    state = await _state(client, workflow_id)
+    if state.status != "RUNNING" or state.phase != "WAITING_FOR_AGENT_REVISION":
+        raise HTTPException(409, "Workflow is not waiting for an agent revision")
+    await client.get_workflow_handle(workflow_id).signal("command", {
+        "action": "agent_feedback", "actor": feedback.submitted_by, "message": feedback.message})
     return {"accepted": True}
 
 

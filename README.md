@@ -1,6 +1,46 @@
-# Fabric API
+# Fabric migration workspace
 
-A minimal FastAPI application with a health endpoint and interactive API documentation.
+A business-facing migration workspace backed by FastAPI and Temporal.
+
+## Migration workspace UI
+
+Open `/` for the live dashboard, searchable migration jobs, source connections,
+and guided migration setup. Each job opens as a continuous assistant conversation.
+Review cards open the existing approval forms in a right-hand panel; tables,
+SQL scripts, activity, and job details open there too, without replacing the chat.
+The review panel closes when the workflow advances to another decision.
+The conversation merges timestamped Temporal steps with the linked OpenCode
+session's public text and tool calls (including selected SQL, file, and search
+inputs). Private reasoning and raw tool outputs are not exposed. OpenCode
+availability is independent of workflow status. Results shortcuts appear after
+the job finishes. Each decision opens its own recorded values; new approval
+signals also retain a review snapshot. Older jobs explicitly indicate when a
+snapshot was not recorded.
+Approval controls preserve the existing workflow decisions;
+technical JSON is collapsed behind details. Light, dark, and system themes are
+available in the header and the preference is saved in the browser.
+
+The read-only `/workspace/jobs`, `/workspace/jobs/{workflow_id}`, and
+`/workspace/jobs/{workflow_id}/events` APIs project Temporal visibility and event
+history. Listing and events support opaque page cursors. Dashboard counts and
+filters cover loaded jobs, with older pages available explicitly. Object counts
+describe reported plans, not loaded rows or distinct objects across all jobs.
+Provisioning reports and Config DB audit records provide per-object outcomes.
+Unavailable pipeline row counts remain "Not reported". History follows Temporal
+namespace retention; this UI does not create a separate archival database.
+
+Frontend source is in `frontend/`. Fluent Web Components and SQL highlighting
+are bundled locally into `app/static/`, which is served by FastAPI. The committed
+assets run without a Node server or external CDN. To rebuild after an edit:
+
+```powershell
+npm ci
+npm run build
+npm run test:ui
+```
+
+The API and worker continue to run as described below. UI changes do not require
+restarting the worker and do not start data-loading pipelines.
 
 ## Temporal migration control
 

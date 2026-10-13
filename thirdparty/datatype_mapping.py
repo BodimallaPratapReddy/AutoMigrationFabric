@@ -207,12 +207,13 @@ def map_sap_field(field: SAPFieldMetadata) -> FabricTypeMapping:
     if kind in policy["length_bound_types"]:
         if field.leng < 1:
             return _default(source, policy, "SAP field length needs review")
-        target = f"{policy['length_bound_types'][kind]}({field.leng})"
+        base = policy['length_bound_types'][kind]
+        target = base if base == 'STRING' else f"{base}({field.leng})"
     elif kind in policy["binary_length_types"]:
         if field.leng < 1:
             return FabricTypeMapping(source_type=source, fabric_type=None, supported=False,
                                      warning="Binary field length needs review")
-        target = f"VARBINARY({field.leng})"
+        target = policy.get('binary_target') or f"VARBINARY({field.leng})"
     elif kind in policy["decimal_types"]:
         if not 1 <= field.leng <= 38 or not 0 <= field.decimals <= field.leng:
             return _default(source, policy, "Decimal precision or scale needs review")

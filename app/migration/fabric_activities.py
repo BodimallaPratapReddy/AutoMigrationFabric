@@ -2,7 +2,7 @@
 
 from temporalio import activity
 
-from services.fabric_provisioning import parse_provisioning_notebook_result
+from services.fabric_provisioning import parse_provisioning_notebook_result, ProvisioningLogicalFailure
 from services.fabric_validation import validate_fabric_target
 from thirdparty.fabric.client import FabricClient
 
@@ -40,8 +40,13 @@ def get_provisioning_status(payload: dict) -> dict:
 @activity.defn(name="parse_provisioning")
 def parse_provisioning(payload: dict) -> dict:
     from thirdparty.fabric.models import FabricJobInstance
-    result = parse_provisioning_notebook_result(
-        FabricJobInstance.model_validate(payload["job"]), expected_plan_guid=payload["plan_guid"])
+    from temporalio.exceptions import ApplicationError
+    try:
+        result = parse_provisioning_notebook_result(
+            FabricJobInstance.model_validate(payload["job"]), expected_plan_guid=payload["plan_guid"])
+    except ProvisioningLogicalFailure as exc:
+        raise ApplicationError("Provisioning notebook reported FAILED", exc.result.model_dump(mode="json"),
+                               type="FabricProvisioningLogicalFailure", non_retryable=True) from None
     return result.model_dump(mode="json")
 
 

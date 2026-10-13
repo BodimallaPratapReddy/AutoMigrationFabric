@@ -9,6 +9,39 @@ notebook extracts SAP rows, runs the ingestion pipeline, or advances its waterma
 This document covers `SAP_TABLE`. SAP ODP and datasource rebuild workflows are
 separate routes and do not use this existing-table approval sequence.
 
+## OpenCode discovery
+
+New SAP requests use `OpenCodeMCPSAPTableMigrationWorkflow` through OpenCode.
+Built-in SAP discovery is rejected for new requests; legacy types remain registered for replay. Set `OPENCODE_SAP_SOURCE_CONNECTIONS`
+in the Fabric app's ignored `.env`, for example `{"SAP ECC Local":"ECC-LOCAL"}`.
+The left name is the selected ConfigDB connection; the right is the destination
+in `sap-abap-adt`. Restart the worker after changing environment settings.
+The agent reads DDIC metadata and validates keys through the
+explicitly mapped MCP system and must verify endpoint/client compatibility.
+MCP destination TLS settings are separate from the app's SAP TLS settings.
+
+The `sap-table-to-fabric` agent uses `sap-to-fabric-table-design`, `sap-abap-adt`,
+`sap-help`, `abap-docs` and `microsoft-learn`. The app checks proposal structure,
+mapping consistency and completed MCP call provenance. It performs no independent
+SAP SDK lookup and uses no custom scraper or legacy datatype mapper.
+It reviews columns, checks keys, obtains watermark/full-refresh and delete-policy
+approvals, then reviews the target and provisions the approved plan. Later UI
+approvals and unknown non-key nullability must not block agent discovery.
+
+Agent plans save an explicit **native SQL** projection in `SourceTables.ExtractSql`,
+with quoted identifiers, ordered aliases and validated direct fields or supported
+scalar conversions, without a watermark WHERE clause. Any source execution
+validation must use available MCP tools and recorded evidence; SQL generation alone
+does not establish transport/value fidelity. Source SQL follows the actual native
+database dialect, not ABAP SQL or target Spark SQL. The external pipeline explicitly
+adds the configured client predicate; the HTTP `sap-client` parameter does not
+implicitly filter native SQL rows. It uses the same client scope for reconciliation,
+checks live DDIC against configured columns/types, appends typed bounds and stages
+data for loading. It owns drift reporting, overlap/checkpoints and delete execution.
+Saving configuration does not implement or test the external pipeline. Existing
+ExtractSql/description/delete-policy database fields are reused; no additional
+database migration is needed for this SAP integration.
+
 ## Config DB tables
 
 All tables below are in the `bronze_replication` schema.
@@ -37,13 +70,13 @@ from `thirdparty/sap/sap_type_mapping.json`. Important Bronze mappings include:
 
 | SAP datatype | Configured Fabric datatype | Purpose |
 |---|---|---|
-| `CLNT` | `VARCHAR(3)` | Keep the client identifier and leading zeros. |
-| `CHAR(n)` / `NUMC(n)` | `VARCHAR(n)` | Preserve source text and numeric-character identifiers. |
-| `DATS` | `VARCHAR(8)` | Preserve the SAP `YYYYMMDD` representation, including initial values. |
-| `TIMS` | `VARCHAR(6)` | Preserve `HHMMSS`; do not interpret it as a standalone change watermark. |
+| `CLNT` | `STRING` | Keep the client identifier and leading zeros. |
+| `CHAR(n)` / `NUMC(n)` | `STRING` | Preserve source text and numeric-character identifiers. |
+| `DATS` | `STRING` | Preserve the SAP `YYYYMMDD` representation, including initial values. |
+| `TIMS` | `STRING` | Preserve `HHMMSS`; do not interpret it as a standalone change watermark. |
 | `DEC`, `CURR`, `QUAN` | `DECIMAL(p,s)` | Retain configured numeric precision and scale. |
 
-The notebook normalizes configured text types to physical Delta `STRING`.
+New mappings use canonical Spark types; the notebook also normalizes older configured text types to Delta `STRING`.
 Configured lengths remain metadata; the notebook does not enforce them.
 SAP namespaced column names such as `/DMBE/DEALNUMBER` are safely quoted.
 

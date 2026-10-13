@@ -6,11 +6,12 @@ from uuid import UUID
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 
-Approach = Literal["ORACLE_TABLE", "SAP_TABLE", "SAP_ODP", "SAP_REBUILD"]
+Approach = Literal["ORACLE_TABLE", "ORACLE_VIEW", "SAP_TABLE", "SAP_VIEW", "SAP_ODP", "SAP_REBUILD"]
 
 
 class MigrationInput(BaseModel):
     migration_approach: Approach
+    discovery_provider: Literal["BUILTIN", "OPENCODE"] = "BUILTIN"
     source_connection_name: str = Field(min_length=1)
     source_object_name: str = Field(min_length=1)
     source_schema_name: str | None = None
@@ -36,8 +37,12 @@ class MigrationInput(BaseModel):
 
     @model_validator(mode="after")
     def validate_source(self) -> "MigrationInput":
-        if self.migration_approach == "ORACLE_TABLE" and not self.source_schema_name:
+        if self.discovery_provider == "OPENCODE" and self.migration_approach not in {"ORACLE_TABLE", "ORACLE_VIEW", "SAP_TABLE", "SAP_VIEW", "SAP_ODP", "SAP_REBUILD"}:
+            raise ValueError("OpenCode discovery supports Oracle and SAP tables/views")
+        if self.migration_approach in {"ORACLE_TABLE", "ORACLE_VIEW"} and not self.source_schema_name:
             raise ValueError("Oracle table migrations require source_schema_name")
+        if self.migration_approach in {"ORACLE_VIEW", "SAP_VIEW"} and self.discovery_provider != "OPENCODE":
+            raise ValueError("View migrations require OpenCode discovery")
         return self
 
 
@@ -103,3 +108,22 @@ class MigrationState(BaseModel):
     provisioning_report: dict | None = None
     replication_status: str | None = None
     batch_run_id: str | None = None
+    agent_session_id: str | None = None
+    agent_progress: list[dict] = Field(default_factory=list)
+    agent_request: dict | None = None
+    agent_report: str | None = None
+    agent_validation_error: str | None = None
+    agent_blocker: dict | None = None
+    view_correction_attempt: int = 0
+
+
+class AgentReply(BaseModel):
+    approved_by: str = Field(min_length=1)
+    request_id: str = Field(min_length=1)
+    answer: dict | None = None
+    decision: Literal["once", "reject"] | None = None
+
+
+class AgentFeedback(BaseModel):
+    submitted_by: str = Field(min_length=1)
+    message: str = Field(min_length=1, max_length=16000)

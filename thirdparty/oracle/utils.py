@@ -140,6 +140,7 @@ class OracleTableInfo(BaseModel):
 class OracleTableInspection(BaseModel):
     schema_name: str
     table_name: str
+    description: str | None = None
     table_info: OracleTableInfo
     columns: list[OracleTableColumn]
     primary_key: OracleKey | None = None
@@ -366,10 +367,17 @@ class OracleClient:
             warnings.append("Optimizer row statistics are unavailable")
         return OracleTableInspection(
             schema_name=schema, table_name=table, table_info=info,
+            description=self.get_table_description(schema, table),
             columns=columns, primary_key=info.primary_key, unique_keys=info.unique_keys,
             indexes=indexes, watermark_candidates=candidates,
             statistics=statistics, partition_info=partitions, warnings=warnings,
         )
+
+    def get_table_description(self, schema_name: str, table_name: str) -> str | None:
+        rows = _records(self.execute_sql(
+            "SELECT comments FROM all_tab_comments WHERE owner = :owner AND table_name = :table_name",
+            {"owner": _identifier(schema_name, "schema_name"), "table_name": _identifier(table_name, "table_name")}))
+        return rows[0].get("COMMENTS") if rows else None
 
     def _keys(self, schema_name: str, table_name: str, kind: str) -> list[OracleKey]:
         rows = _records(self.execute_sql(

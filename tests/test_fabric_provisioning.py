@@ -16,6 +16,22 @@ PLAN = "cfafbeb1-8037-4d0c-896e-a46fb27ff229"
 OTHER = "5b218778-e7a5-4d73-8187-f10824047715"
 
 
+def test_activity_failure_preserves_object_report_for_workflow_ui():
+    import pytest
+    from temporalio.exceptions import ApplicationError
+    from app.migration.fabric_activities import parse_provisioning
+    report = {"status": "FAILED", "plan_guid": PLAN, "tables_processed": 0,
+              "views_processed": 0, "message": "View cannot resolve",
+              "objects": [{"object_type": "VIEW", "name": "ONT.V", "status": "FAILED",
+                           "duration_seconds": 1, "message": "INVALID_VIEW_TEXT"}]}
+    with pytest.raises(ApplicationError) as error:
+        parse_provisioning({"job": job(FabricJobStatus.SUCCEEDED, json.dumps(report)).model_dump(mode="json"),
+                            "plan_guid": PLAN})
+    assert error.value.type == "FabricProvisioningLogicalFailure"
+    assert error.value.non_retryable
+    assert error.value.details[0]["objects"][0]["message"] == "INVALID_VIEW_TEXT"
+
+
 def job(status: FabricJobStatus, exit_value: str | None = None) -> FabricJobInstance:
     return FabricJobInstance(id=OTHER, status=status.value, normalized_status=status,
                              exit_value=exit_value)

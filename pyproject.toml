@@ -18,12 +18,14 @@ dependencies = [
     "oracledb>=2.0.0",
     "python-dotenv",
     "temporalio>=1.10,<2",
+    "sqlglot>=29,<30",
 ]
 
 [tool.setuptools.packages.find]
 include = ["app*", "thirdparty*", "services*"]
 
 [tool.setuptools.package-data]
+"app" = ["migration_ui.html", "static/*.js", "static/*.css"]
 "thirdparty.oracle" = ["oracle_type_mapping.json"]
 "thirdparty.sap" = ["sap_type_mapping.json"]
 

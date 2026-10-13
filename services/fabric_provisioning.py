@@ -43,6 +43,7 @@ class ProvisionedObjectResult(BaseModel):
     completed_at: datetime | None = None
     rows_written: int | None = Field(default=None, ge=0, strict=True)
     message: str | None = None
+    error_code: str | None = Field(default=None, max_length=160)
 
 
 class ProvisioningNotebookResult(BaseModel):

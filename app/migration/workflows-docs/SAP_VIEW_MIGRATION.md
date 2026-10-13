@@ -1,0 +1,21 @@
+# SAP database view migration
+
+`POST /migrations/sap-view` starts `OpenCodeMCPSAPViewMigrationWorkflow` using `migration_approach=SAP_VIEW` and `discovery_provider=OPENCODE`. The UI offers **SAP view and base tables** for SAP ECC connections. Supply the source view name and Fabric destination; SAP source schema is not required.
+
+The agent discovers a bounded classic SE11 database-view dependency graph through `sap-abap-adt` MCP. Every transparent base table uses the same Data Element/Domain guidance, canonical mappings and exact extraction conversions as SAP table migration. The worker validates graph structure, metadata consistency and completed MCP provenance; it performs no independent custom SAP SDK lookup. Source SQL checks require actual MCP execution evidence. The OpenCode agent `sap-view-to-fabric` loads `sap-to-fabric-view-design` and the existing table-design skill. Install both agents/skills in the configured OpenCode directory. `OPENCODE_SAP_SOURCE_CONNECTIONS` is shared with SAP table migration; `OPENCODE_SAP_VIEW_AGENT` optionally overrides the agent name.
+
+The workflow reviews columns, validates/reviews keys, selects a watermark or full refresh, and approves delete handling separately for each base table. Final bundle approval persists base tables, ExtractSql, replication settings, view SQL and dependency indexes. The existing notebook provisions tables with comments before views. Scheduled data extraction/loading remains external. Native SQL extraction and key reconciliation require explicit SAP client scope; HTTP logon client alone does not filter records.
+
+Source metadata and direct dependencies must exactly match the verified graph. Spark SQL is a single explicit SELECT with the original output names/order and selected-schema references. The agent must preserve joins, filters and semantics while accounting for converted base types. Parsing and empty-table provisioning do not establish equivalence against actual source data. CDS/parameterized/incomplete definitions and unsupported source dependencies fail discovery rather than guessing.
+
+New bundles use distinct base targets (by default root-name prefixes) and must not implicitly overwrite registered targets. No ConfigDB schema migration is needed: SAP_VIEW is stored in the existing MigrationApproach field, and existing SourceTables/FabricViews/dependency models are reused.
+
+View-only notebook SQL failures return to the same OpenCode session. Repair is limited to eligible failed view SQL and translation notes, with unchanged base-table proposals, extraction, replication, destinations and dependencies. Human approval precedes each retry; at most two corrections are accepted. Cancellation during agent discovery interrupts the OpenCode session through the existing cancellation handler.
+
+## Historical test, 12 October 2026 (before MCP-only discovery)
+
+UI workflow `sap-view-0ab2978c-a98c-436d-b0b3-f90c229c1de7` (run `01a12fc0-e2ce-7705-ac38-4afcb8db788e`, plan `8cd40f1d-c92a-5e6a-b624-7c8b4e46db27`) completed for `SAP ECC Local / ZTEST_VIEW`. OpenCode used `sap-view-to-fabric` in session `ses_8360da9480654a955a89c833a8`. Both table extraction queries passed native zero-row checks. The UI separately approved 225 VBAK fields and 97 VBUK fields, verified MANDT/VBELN keys, AEDAT watermarks and daily MARK reconciliation.
+
+Notebook job `d898d422-0bf7-4710-9eef-ed7be76af934` succeeded on its first attempt: `SAP_VIEW_TEST.ZTEST_VIEW_VBAK`, `SAP_VIEW_TEST.ZTEST_VIEW_VBUK` and `SAP_VIEW_TEST.ZTEST_VIEW` were created. The view preserves the MANDT/VBELN inner join, VKORG='OT20' predicate and ordered VBELN, ERDAT, NETWR, WAERK, LFSTK, ABSTK projection. ConfigDB retains table and all 322 column descriptions, extraction SQL and two view dependency links. Existing SAP.VBAK was preserved.
+
+This verifies metadata discovery, mapping validation, per-table reviews, configuration persistence and schema/view provisioning. It does not verify scheduled ingestion, actual-data equivalence or AEDAT change coverage; those remain external pipeline checks. VBUK.VESTK was conservatively retained as STRING with an explicit semantic-evidence warning. Initial-value audit, typed transport decoding, client filtering and same-day watermark overlap remain pipeline requirements.

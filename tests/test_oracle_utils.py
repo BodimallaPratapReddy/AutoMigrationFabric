@@ -149,13 +149,15 @@ class OracleClientTests(unittest.TestCase):
             "columns": ["NUM_ROWS", "BLOCKS", "AVG_ROW_LEN", "LAST_ANALYZED"],
             "rows": [[250, 10, 24, "2026-09-30T12:00:00"]], "row_count": 1,
         })
-        with patch.object(client, "execute_sql", side_effect=[info_json, stats_json]), \
+        with patch.object(client, "execute_sql", side_effect=[info_json, stats_json,
+             json.dumps({"columns": ["COMMENTS"], "rows": [["Original Oracle table comment"]], "row_count": 1})]), \
              patch.object(client, "get_primary_key", return_value=None), \
              patch.object(client, "get_unique_keys", return_value=[]), \
              patch.object(client, "get_table_schema", return_value=[]), \
              patch.object(client, "get_indexes", return_value=[]):
             inspection = client.inspect_table(" ont ", " orders ")
         self.assertEqual(inspection.table_info.estimated_rows, 250)
+        self.assertEqual(inspection.description, "Original Oracle table comment")
         self.assertEqual(inspection.statistics.blocks, 10)
         self.assertFalse(inspection.partition_info.partitioned)
         self.assertIn("No primary key found", inspection.warnings)

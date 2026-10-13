@@ -1,4 +1,6 @@
-# Fabric provisioning script. In Fabric, mark the first code cell as parameters.
+# Fabric provisioning script. In Fabric, mark the parameter cell as parameters.
+# Provide sqlglot==29.0.1 in the Fabric environment; CTE handling installs it if absent.
+# SQL_VIEW definitions with CTEs use scoped expansion to avoid INVALID_VIEW_TEXT.
 # Source row loading belongs exclusively to the scheduled replication pipeline.
 # Historical reload requests reset ReplicationState.LastWatermarkValue to NULL.
 # Apply configdb/migrations/003_target_change_runs.sql before ALTER_BACKFILL or
@@ -7,6 +9,7 @@
 plan_guid = ""  # Required Text parameter supplied by the app
 CREATIONREQUEST = "BOTH"  # Optional manual scope: TABLE, VIEW, BOTH
 RUN_MODE = "PROVISION"  # Interactive modes: PROVISION, TEST, DIAGNOSE
+VALIDATE_EXISTING_TABLES_FOR_PLAN = ""  # Explicit recovery only, after prior creation evidence
 
 # %%
 
@@ -402,9 +405,12 @@ def get_spark() -> Any:
     """Return the active Spark session (the predefined ``spark`` in Fabric notebooks)."""
     existing = globals().get("spark")
     if existing is not None:
+        existing.conf.set("spark.sql.session.timeZone", "UTC")
         return existing
     from pyspark.sql import SparkSession
-    return SparkSession.builder.getOrCreate()
+    session = SparkSession.builder.getOrCreate()
+    session.conf.set("spark.sql.session.timeZone", "UTC")
+    return session
 
 
 def first_line(exc: BaseException, limit: int = 110) -> str:
@@ -507,6 +513,7 @@ class ColumnDef:
     is_watermark_candidate: Optional[bool] = None
     source_expression: Optional[str] = None
     transformation_notes: Optional[str] = None
+    etrm_description: Optional[str] = None
 
 
 # How tables of a lakehouse are addressed, decided by LakehouseTarget.preflight and then cached:
@@ -606,6 +613,7 @@ class TableSpec:
     is_active: bool
     target: LakehouseTarget
     columns: Tuple[ColumnDef, ...]
+    description: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -650,6 +658,7 @@ class ObjectResult:
     completed_at: Optional[str] = None
     rows_written: Optional[int] = None
     message: Optional[str] = None
+    error_code: Optional[str] = None
 
     def to_report(self) -> Dict[str, Any]:
         report: Dict[str, Any] = {
@@ -658,7 +667,7 @@ class ObjectResult:
             "status": self.status,
             "duration_seconds": round(max(float(self.duration_seconds), 0.0), 2),
         }
-        for key in ("started_at", "completed_at", "rows_written", "message"):
+        for key in ("started_at", "completed_at", "rows_written", "message", "error_code"):
             value = getattr(self, key)
             if value is not None:
                 report[key] = value
@@ -675,14 +684,23 @@ def run_timed(object_type: str, name_ref: Dict[str, str],
     FAILED result with a short, secret-free message.
     """
     started_at, t0 = utc_now_iso(), time.monotonic()
+    error_code = None
     try:
         message, rows = action()
         status = Status.SUCCESS
     except Exception as exc:  # noqa: BLE001 - converted into a FAILED result
         message, rows, status = safe_message(exc), None, Status.FAILED
+        for accessor in ("getCondition", "getErrorClass"):
+            try:
+                value = getattr(exc, accessor)()
+                if value and re.fullmatch(r"[A-Z_]+(?:\.[A-Z_]+)*", value):
+                    error_code = value[:160]
+                    break
+            except Exception:  # Some Spark versions do not expose either accessor.
+                pass
         LOG.error("%s %s failed: %s", object_type, name_ref.get("name"), message)
     return ObjectResult(object_type, name_ref["name"], status,
-                        time.monotonic() - t0, started_at, utc_now_iso(), rows, message)
+                        time.monotonic() - t0, started_at, utc_now_iso(), rows, message, error_code)
 
 # %% [markdown]
 # ## 6. ConfigRepository - read access to the configuration tables
@@ -704,10 +722,11 @@ def build_column(row: Dict[str, Any]) -> ColumnDef:
         sno=int(row["Sno"]), source_name=str(row["ColumnName"]), name=name,
         fabric_type=normalize_fabric_type(row["FabricDataType"]),
         nullable=bool(raw_nullable) if known else (not is_pk),
-        nullable_known=known, is_primary_key=is_pk, description=_clean_text(row.get("Description")),
+        nullable_known=known, is_primary_key=is_pk, description=row.get("Description"),
         source_type=_clean_text(row.get("SourceDataType")), raw_fabric_type=_clean_text(row.get("FabricDataType")),
         is_watermark_candidate=(bool(row["IsWatermarkCandidate"]) if row.get("IsWatermarkCandidate") is not None else None),
         source_expression=row.get("SourceExpression"), transformation_notes=row.get("TransformationNotes"),
+        etrm_description=row.get("EtrmDescription"),
     )
 
 
@@ -720,6 +739,7 @@ def build_column_from_plan(item: Dict[str, Any]) -> ColumnDef:
     return build_column({
         "Sno": item.get("sno"), "ColumnName": item["column_name"], "TargetColumnName": item.get("target_column_name"),
         "Description": item.get("description"), "SourceDataType": item.get("source_data_type"),
+        "EtrmDescription": item.get("etrm_description"),
         "FabricDataType": item["fabric_data_type"], "IsPrimaryKey": is_pk, "IsNullable": nullable,
         "IsWatermarkCandidate": item.get("is_watermark_candidate"),
         "SourceExpression": item.get("source_expression"), "TransformationNotes": item.get("transformation_notes"),
@@ -759,6 +779,7 @@ def build_table_spec(row: Dict[str, Any], column_rows: Sequence[Dict[str, Any]])
         guid=norm_guid(row["GUID"]), plan_guid=norm_guid(row["PlanGUID"]),
         status=str(row["ProvisioningStatus"]), is_active=bool(row["IsActive"]),
         target=_build_target(row, "FabricLakehouseSchema", "FabricTableName"), columns=columns,
+        description=row.get("Description"),
     )
 
 
@@ -834,12 +855,12 @@ class ConfigRepository:
     def get_table_spec(self, guid: str) -> TableSpec:
         row = self._db.fetch_one(
             f"SELECT GUID, PlanGUID, FabricWorkspaceId, FabricLakehouseName, FabricLakehouseId, "
-            f"FabricLakehouseSchema, FabricTableName, ProvisioningStatus, IsActive "
+            f"FabricLakehouseSchema, FabricTableName, ProvisioningStatus, IsActive, Description "
             f"FROM {self._s}.SourceTables WHERE GUID = ?", (guid,))
         if row is None:
             raise ValidationError("Table configuration row was not found.")
         cols = self._db.fetch_all(
-            f"SELECT Sno, ColumnName, TargetColumnName, Description, SourceDataType, FabricDataType, "
+            f"SELECT Sno, ColumnName, TargetColumnName, Description, EtrmDescription, SourceDataType, FabricDataType, "
             f"IsPrimaryKey, IsNullable FROM {self._s}.SourceTableColumns "
             f"WHERE GUID = ? AND IsSelected = 1 ORDER BY Sno", (guid,))
         return build_table_spec(row, cols)
@@ -857,7 +878,7 @@ class ConfigRepository:
     def get_column_rows(self, source_table_guid: str) -> List[Dict[str, Any]]:
         """ALL recorded column rows (selected or not) with every field, to preserve what Notes lacks."""
         return self._db.fetch_all(
-            f"SELECT Sno, ColumnName, TargetColumnName, Description, SourceDataType, FabricDataType, "
+            f"SELECT Sno, ColumnName, TargetColumnName, Description, EtrmDescription, SourceDataType, FabricDataType, "
             f"IsPrimaryKey, IsNullable, IsWatermarkCandidate, IsSelected, SourceExpression, "
             f"TransformationNotes FROM {self._s}.SourceTableColumns WHERE GUID = ? ORDER BY Sno",
             (source_table_guid,))
@@ -926,7 +947,10 @@ class ConfigRepository:
                               column_rows: Sequence[Tuple[Any, ...]], replication_updates: Dict[str, Any],
                               complete_run_guid: Optional[str] = None,
                               resume_ingestion: Optional[bool] = None,
-                              reset_watermark: bool = False) -> None:
+                              reset_watermark: bool = False,
+                              extract_sql: Optional[str] = None,
+                              table_description: Optional[str] = None,
+                              table_etrm_description: Optional[str] = None) -> None:
         """
         Replace the recorded columns and update ReplicationConfig in ONE transaction.
 
@@ -947,7 +971,7 @@ class ConfigRepository:
                 self._db.execute(
                     f"INSERT INTO {s}.SourceTableColumns (GUID, Sno, ColumnName, TargetColumnName, Description, "
                     f"SourceDataType, FabricDataType, IsPrimaryKey, IsNullable, IsWatermarkCandidate, IsSelected, "
-                    f"SourceExpression, TransformationNotes) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    f"SourceExpression, TransformationNotes, EtrmDescription) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     (source_table_guid,) + tuple(values))
             if replication_updates:
                 assignments = ", ".join(f"{col} = ?" for col in replication_updates)   # column names come from a whitelist
@@ -956,8 +980,8 @@ class ConfigRepository:
                     f"WHERE SourceTableGUID = ?", tuple(replication_updates.values()) + (source_table_guid,))
                 if changed != 1:
                     raise TargetStateError("ReplicationConfig row for the target was not found; nothing was saved.")
-            if self._db.execute(f"UPDATE {s}.SourceTables SET UpdatedTimestamp = SYSUTCDATETIME() WHERE GUID = ?",
-                                (source_table_guid,)) != 1:
+            if self._db.execute(f"UPDATE {s}.SourceTables SET ExtractSql = ?, Description = ?, EtrmDescription = ?, UpdatedTimestamp = SYSUTCDATETIME() WHERE GUID = ?",
+                                (extract_sql, table_description, table_etrm_description, source_table_guid)) != 1:
                 raise TargetStateError("Target record disappeared; nothing was saved.")
             if reset_watermark and self._db.execute(
                     f"UPDATE {s}.ReplicationState SET LastWatermarkValue = NULL, Status = 'NOT_STARTED', "
@@ -1066,6 +1090,8 @@ def compare_definitions(recorded: Sequence[ColumnDef], proposed: Sequence[Column
         return (a.fabric_type != b.fabric_type or a.is_primary_key != b.is_primary_key
                 or (a.nullable_known and b.nullable_known and a.nullable != b.nullable)
                 or (b.description is not None and a.description != b.description)
+                or (b.etrm_description is not None and a.etrm_description != b.etrm_description)
+                or a.source_expression != b.source_expression
                 or bool(a.source_type and b.source_type and a.source_type.upper() != b.source_type.upper()))
 
     return {"added": set(prop) - set(rec), "removed": set(rec) - set(prop),
@@ -1208,7 +1234,8 @@ def build_column_insert_rows(proposed: Sequence[ColumnDef], existing_rows: Seque
         rows.append((c.sno, c.source_name, c.name, pick(c.description, "Description"),
                      c.source_type or prev.get("SourceDataType") or c.fabric_type, c.raw_fabric_type or c.fabric_type,
                      1 if c.is_primary_key else 0, int(c.nullable) if c.nullable_known else None, 1 if watermark else 0, 1,
-                     pick(c.source_expression, "SourceExpression"), pick(c.transformation_notes, "TransformationNotes")))
+                     pick(c.source_expression, "SourceExpression"), pick(c.transformation_notes, "TransformationNotes"),
+                     pick(c.etrm_description, "EtrmDescription")))
     names = {c.name.lower() for c in proposed}
     next_sno = max([c.sno for c in proposed] or [0]) + 1
     for r in existing_rows:
@@ -1216,7 +1243,7 @@ def build_column_insert_rows(proposed: Sequence[ColumnDef], existing_rows: Seque
             rows.append((next_sno, r["ColumnName"], r.get("TargetColumnName"), r.get("Description"), r["SourceDataType"],
                          r["FabricDataType"], int(bool(r.get("IsPrimaryKey"))),
                          None if r.get("IsNullable") is None else int(bool(r["IsNullable"])),
-                         int(bool(r.get("IsWatermarkCandidate"))), 0, r.get("SourceExpression"), r.get("TransformationNotes")))
+                         int(bool(r.get("IsWatermarkCandidate"))), 0, r.get("SourceExpression"), r.get("TransformationNotes"), r.get("EtrmDescription")))
             next_sno += 1
     return rows
 
@@ -1345,7 +1372,8 @@ def build_create_table_sql(spec: TableSpec, or_replace: bool = False) -> str:
     """CREATE [OR REPLACE] TABLE statement for a validated spec (pure function)."""
     head = "CREATE OR REPLACE TABLE" if or_replace else "CREATE TABLE"
     cols = ",\n  ".join(column_ddl(c) for c in sorted(spec.columns, key=lambda c: c.sno))
-    return f"{head} {spec.target.fq} (\n  {cols}\n) USING DELTA"
+    comment = f" COMMENT {sql_literal(spec.description)}" if spec.description else ""
+    return f"{head} {spec.target.fq} (\n  {cols}\n) USING DELTA{comment}"
 
 
 class DeltaTableManager:
@@ -1425,10 +1453,59 @@ def prepare_select(view_sql: str) -> str:
     return text
 
 
+def inline_view_ctes(select: str) -> str:
+    """Avoid Fabric persisting qualified CTE names as invalid view text.
+
+    Expand scoped, non-recursive CTE references as derived tables; preserve every
+    projection, join, aggregation and window expression. No datatype mappings.
+    Notebook deployments need sqlglot==29.0.1 for SQL_VIEW definitions with WITH.
+    """
+    if not re.search(r"\bWITH\b", select, re.I):
+        return select
+    try:
+        import sqlglot
+        from sqlglot import exp
+        from sqlglot.optimizer.scope import Scope, traverse_scope
+    except ImportError:
+        # A pure Python dependency can be imported without restarting Spark/Python,
+        # preserving the injected parameters and returning failures in the object report.
+        import subprocess
+        import sys
+        try:
+            subprocess.run([sys.executable, "-m", "pip", "install", "sqlglot==29.0.1"],
+                           check=True, timeout=120, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            import sqlglot
+            from sqlglot import exp
+            from sqlglot.optimizer.scope import Scope, traverse_scope
+        except (subprocess.SubprocessError, OSError, ImportError):
+            raise ValidationError("Cannot load sqlglot==29.0.1; install it in the notebook environment.") from None
+    tree = sqlglot.parse_one(select, read="spark")
+    for item in tree.find_all(exp.With):
+        if item.args.get("recursive"):
+            raise ValidationError("Recursive CTEs are unsupported for persisted Fabric views.")
+    for item in tree.find_all(exp.CTE):
+        if item.alias_column_names:
+            raise ValidationError("CTE column alias lists require explicit projection aliases.")
+    # Reusing volatile CTE expressions can change evaluation counts when expanded.
+    if list(tree.find_all(exp.Rand)) or list(tree.find_all(exp.Randn)) or list(tree.find_all(exp.Uuid)):
+        raise ValidationError("Volatile CTE expressions require a separate view design.")
+    for scope in traverse_scope(tree):
+        for node, source in scope.selected_sources.values():
+            if isinstance(node, exp.Table) and isinstance(source, Scope):
+                alias = node.args.get("alias")
+                alias = alias.copy() if alias else exp.TableAlias(this=node.this.copy())
+                node.replace(exp.Subquery(this=source.expression.copy(), alias=alias))
+        scope.expression.set("with_", None)
+        if len(tree.sql(dialect="spark")) > 1_000_000:
+            raise ValidationError("Expanded view SQL exceeds 1 MB.")
+    return tree.sql(dialect="spark")
+
+
 def build_create_view_sql(spec: ViewSpec) -> str:
     """CREATE OR REPLACE VIEW (SQL_VIEW) or CREATE OR REPLACE TABLE ... AS (materialised types)."""
     select = prepare_select(spec.view_sql)
     if spec.view_type == "SQL_VIEW":
+        select = inline_view_ctes(select)
         comment = f" COMMENT {sql_literal(spec.description[:1000])}" if spec.description else ""
         return f"CREATE OR REPLACE VIEW {spec.target.fq}{comment} AS\n{select}"
     return f"CREATE OR REPLACE TABLE {spec.target.fq} USING DELTA AS\n{select}"
@@ -1489,11 +1566,13 @@ def run_table_provision(plan_guid: str, object_guid: str, run_id: str = "",
         mgr = manager or DeltaTableManager()
         LOG.info("[%s] create table %s", run_id, spec.target.display)
         if mgr.exists(spec.target):
-            if CREATE_NEW_ALLOWS_IDENTICAL_EXISTING and plan_schema_changes(
+            recovery = (is_valid_uuid(VALIDATE_EXISTING_TABLES_FOR_PLAN)
+                        and norm_guid(VALIDATE_EXISTING_TABLES_FOR_PLAN) == norm_guid(plan_guid))
+            if (CREATE_NEW_ALLOWS_IDENTICAL_EXISTING or recovery) and plan_schema_changes(
                     mgr.physical_columns(spec.target), spec.columns).is_empty:
                 return "Table already exists; schema validated", None
             raise TargetStateError("Target table already exists" +
-                                   (" with a different schema." if CREATE_NEW_ALLOWS_IDENTICAL_EXISTING else "."))
+                                   (" with a different schema." if CREATE_NEW_ALLOWS_IDENTICAL_EXISTING or recovery else "."))
         mgr.create(spec)
         mgr.verify(spec)
         return "Table created; schema validated", 0
@@ -1520,6 +1599,12 @@ def run_view_provision(plan_guid: str, object_guid: str, run_id: str = "",
     return run_timed(ObjectType.VIEW, name_ref, action)
 
 
+def description_updates(change: TargetChange) -> Dict[str, Any]:
+    return {target: change.proposed_table[source]
+            for source, target in (("description", "table_description"), ("etrm_description", "table_etrm_description"))
+            if source in change.proposed_table}
+
+
 def _revise_planned(change: TargetChange, repo_factory: Callable[[], Any], mgr: DeltaTableManager) -> Tuple[str, Optional[int]]:
     """REVISE_PLANNED: rewrite the saved configuration of a PENDING record; no physical table may exist."""
     with repo_factory() as repo:
@@ -1536,7 +1621,9 @@ def _revise_planned(change: TargetChange, repo_factory: Callable[[], Any], mgr: 
     check_against_approval(compare_definitions(existing.columns, change.columns), change.approved_comparison, required=True)
     with repo_factory() as repo:
         repo.apply_metadata_change(existing.guid, "PENDING", build_column_insert_rows(change.columns, existing_rows),
-                                   replication_updates(change.replication))
+                                   replication_updates(change.replication),
+                                   **({"extract_sql": change.proposed_table["extract_sql"]} if change.proposed_table.get("extract_sql") else {}),
+                                   **description_updates(change))
         if "ingestion_flag" in change.replication:
             repo.set_ingestion_flag(existing.guid, bool(change.replication["ingestion_flag"]))
     return "Planned configuration revised; no physical table created", None
@@ -1601,7 +1688,9 @@ def _alter_future(change: TargetChange, repo_factory: Callable[[], Any], mgr: De
         mutated = True                                                # from here ingestion stays paused on failure
         with repo_factory() as repo:
             repo.apply_metadata_change(guid, "PROVISIONED", build_column_insert_rows(proposed, existing_rows),
-                                       replication_updates(change.replication))
+                                       replication_updates(change.replication),
+                                       **({"extract_sql": change.proposed_table["extract_sql"]} if change.proposed_table.get("extract_sql") else {}),
+                                       **description_updates(change))
             final_flag = original_flag  # The proposal uses False as a staging default, not a user pause request.
             if final_flag is not None:
                 repo.set_ingestion_flag(guid, final_flag)
@@ -1679,7 +1768,9 @@ def _reload_change(change: TargetChange, plan_guid: str, repo_factory: Callable[
             repo.apply_metadata_change(
                 guid, 'PROVISIONED', build_column_insert_rows(change.columns, previous_rows),
                 replication_updates(change.replication), complete_run_guid=plan_guid,
-                resume_ingestion=original_flag, reset_watermark=True)
+                resume_ingestion=original_flag, reset_watermark=True,
+                **({"extract_sql": change.proposed_table["extract_sql"]} if change.proposed_table.get("extract_sql") else {}),
+                **description_updates(change))
         message = (f'{change.decision}: structure updated; watermark reset to NULL; '
                    'historical data loading is delegated to the scheduled replication pipeline')
         if not original_flag:

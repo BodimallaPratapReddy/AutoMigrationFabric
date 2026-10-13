@@ -34,6 +34,10 @@ class MigrationWorkflowBase:
 
     @workflow.query
     def get_state(self) -> dict:
+        review=self.state.get('review')
+        if isinstance(review,dict) and any(k in review for k in ('agent_plan_packed','mcp_graph_packed')):
+            # Internal lossless storage is not a user-facing review field.
+            return {**self.state,'review':{k:v for k,v in review.items() if k not in {'agent_plan_packed','mcp_graph_packed'}}}
         return self.state
 
     @workflow.signal
@@ -75,6 +79,9 @@ class MigrationWorkflowBase:
         if len(names) != len(expected) or len(set(names)) != len(names) or set(names) != expected:
             raise ValueError("Every discovered Oracle column must be mapped exactly once")
         selected = {item["name"]: normalize_fabric_type(item["fabric_type"]) for item in choices}
+        if self.state["review"].get("discovery_provider") == "OPENCODE":
+            if any(selected[c["column_name"]] != c["fabric_data_type"] for c in planned):
+                raise ValueError("Revise mappings in the agent plan before approval")
         for column in planned:
             column["fabric_data_type"] = selected[column["column_name"]]
         for column in self.state["review"]["columns"]:
@@ -120,7 +127,7 @@ class MigrationWorkflowBase:
         discovered["table_plan"]["replication"].pop("key_validation", None)
         self._phase("VALIDATING_PRIMARY_KEY", message="Checking source key fields for nulls and duplicates")
         try:
-            result = await self._activity("validate_oracle_key", {"input": self._input, "columns": columns},
+            result = await self._activity(getattr(self, "_source_key_activity", "validate_oracle_key"), {"input": self._input, "columns": columns},
                                           timeout=300)
         except Exception:
             result = {"valid": False, "status": "UNVERIFIED", "columns": columns,
@@ -296,6 +303,11 @@ class MigrationWorkflowBase:
         self.state["provisioning_status"] = "SUCCEEDED"
         self.state["replication_status"] = "SKIPPED"
 
+    async def _discover(self, input: dict, lakehouse_name: str, discovery_activity: str) -> dict:
+        return await self._activity(discovery_activity,
+            {"input": input, "lakehouse_name": lakehouse_name},
+            timeout=300 if discovery_activity == "discover_rebuild" else 120, retry=READ_RETRY)
+
     async def _run(self, input: dict, discovery_activity: str) -> dict:
         self._input = input
         info = workflow.info()
@@ -318,10 +330,7 @@ class MigrationWorkflowBase:
             self._phase("VALIDATING_SOURCE")
             fabric = await self._activity("validate_fabric", input, retry=READ_RETRY)
             self._phase("DISCOVERING_SOURCE")
-            discovered = await self._activity(discovery_activity,
-                {"input": input, "lakehouse_name": fabric["lakehouse_name"]},
-                timeout=300 if discovery_activity == "discover_rebuild" else 120,
-                retry=READ_RETRY)
+            discovered = await self._discover(input, fabric["lakehouse_name"], discovery_activity)
             if discovered.get("failure_reason"):
                 self.state["last_error"] = discovered["failure_reason"]
                 await self._activity("transition_plan", {"plan_guid": guid, "version": 1,
@@ -331,7 +340,7 @@ class MigrationWorkflowBase:
                 return self.state
             self.state["review"] = discovered["review"]
             oracle_delete_policy = (input["migration_approach"] == "ORACLE_TABLE"
-                                    and workflow.patched("oracle-key-validation-delete-policy-v1"))
+                                    and workflow.patched("oracle-key-validation-delete-policy-v1")) or getattr(self, '_sap_agent', False)
             self._oracle_key_checks = oracle_delete_policy
             if oracle_delete_policy:
                 self.state["review"]["key_validation_required"] = True
@@ -349,7 +358,7 @@ class MigrationWorkflowBase:
                 "expected": "DRAFT", "target": "WAITING_PLAN_APPROVAL"})
             sap_target_change = (input["migration_approach"] == "SAP_TABLE"
                                  and workflow.patched("sap-existing-target-changes-v1"))
-            if input["migration_approach"] == "ORACLE_TABLE":
+            if input["migration_approach"] == "ORACLE_TABLE" or getattr(self, '_sap_agent', False):
                 while True:
                     mapping_choice = await self._gate("WAITING_FOR_COLUMN_MAPPING_APPROVAL",
                                                       ("approve_columns", "reject_columns"))
