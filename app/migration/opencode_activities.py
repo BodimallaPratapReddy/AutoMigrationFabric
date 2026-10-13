@@ -61,7 +61,11 @@ def opencode_create(payload: dict) -> dict:
             agents = catalog.get("data", [])
             configured = next((item for item in agents if item.get("id") == agent), None)
             if configured is None:
-                raise ApplicationError(f"OpenCode agent {agent} is not available", non_retryable=True)
+                # The service can answer before its project agent catalog has loaded.
+                # The workflow's bounded READ_RETRY also handles permanently missing agents.
+                raise ApplicationError(
+                    f"OpenCode agent {agent} is not available; check the project agent configuration if retries fail",
+                    type="OpenCodeAgentUnavailable")
             model = configured.get("model") or {
                 "id": os.getenv("OPENCODE_MODEL", "global.anthropic.claude-haiku-5-5"),
                 "providerID": os.getenv("OPENCODE_PROVIDER", "amazon-bedrock"),

@@ -139,3 +139,21 @@ test('no-delete choice is explicit and malformed intervals are blocked', async (
   await vm.runInContext("sendAction('approve')", h.context);
   assert.deepEqual(h.calls[0].body.delete_policy, {mode:'NONE'});
 });
+
+test('accepted approval disables footer and prevents duplicate submission',async()=>{
+  const h=harness('none',[]);
+  await vm.runInContext("sendAction('approve')",h.context);
+  assert.equal(h.element('approve').disabled,true);
+  assert.equal(h.element('reject').disabled,true);
+  await vm.runInContext("sendAction('approve')",h.context);
+  assert.equal(h.calls.length,1);
+});
+
+test('failed approval restores footer for retry',async()=>{
+  const h=harness('none',[]);
+  h.context.request=async()=>{throw new Error('Service unavailable');};
+  await vm.runInContext("sendAction('approve')",h.context);
+  assert.ok(!h.element('approve').disabled);
+  assert.ok(!h.element('reject').disabled);
+  assert.equal(h.message(),'Service unavailable');
+});

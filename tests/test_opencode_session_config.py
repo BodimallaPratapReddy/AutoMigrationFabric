@@ -19,6 +19,17 @@ PAYLOAD = {'workflow_id': 'model-test', 'input': {
     'migration_approach': 'SAP_REBUILD', 'source_object_name': '0FI_GL_4'}}
 
 
+def test_agent_catalog_not_ready_can_be_retried(monkeypatch):
+    def handler(request):
+        if request.url.path == '/api/agent':
+            return httpx.Response(200, json={'data': []})
+        return httpx.Response(404)
+    setup(monkeypatch, handler)
+    with pytest.raises(ApplicationError, match='not available') as caught:
+        oa.opencode_create(PAYLOAD)
+    assert not caught.value.non_retryable
+
+
 def test_creation_uses_deployed_agent_model_not_global_default(monkeypatch):
     model = {'providerID': 'amazon-bedrock', 'id': 'new-model', 'variant': 'medium'}
     posted = []

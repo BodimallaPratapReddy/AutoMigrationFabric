@@ -304,6 +304,16 @@ async def _command(client: Client, workflow_id: str, action: str,
             raise HTTPException(422, str(exc)) from exc
     command = {"action": action, "actor": actor, "message": message,
                "watermark_column": watermark_column, "columns": columns}
+    # Store the exact user-facing review with the decision, rather than reusing
+    # the current (possibly different) review when opening history later.
+    if action.startswith(('approve_', 'reject_')):
+        review = state.review or {}
+        command['review_snapshot'] = {key: review[key] for key in (
+            'source', 'columns', 'primary_key', 'selected_watermark', 'load_method',
+            'write_strategy', 'delete_policy', 'key_validation', 'warnings',
+            'base_table_index', 'base_table_count', 'agent_plan') if key in review}
+        command['review_snapshot']['phase'] = state.phase
+        command['review_snapshot']['source_object_name'] = state.source_object_name
     if target_decision is not None:
         command["decision"] = target_decision
     if primary_key_columns is not None:
@@ -320,7 +330,9 @@ async def reply_to_agent(workflow_id: str, reply: AgentReply, client: TemporalCl
     if state.status != "RUNNING" or state.phase != "WAITING_FOR_AGENT_INPUT" or not state.agent_request:
         raise HTTPException(409, "Workflow is not waiting for an agent answer")
     payload = {"action": "agent_reply", "actor": reply.approved_by,
-               "request_id": reply.request_id, "answer": reply.answer, "decision": reply.decision}
+               "request_id": reply.request_id, "answer": reply.answer, "decision": reply.decision,
+               "review_snapshot": {"source_object_name": state.source_object_name,
+                                   "phase": state.phase, "request": state.agent_request}}
     try:
         validate_reply(state.agent_request, payload)
     except (ValueError, TypeError) as exc:

@@ -1,6 +1,6 @@
 # Oracle to Fabric Bronze migration memory
 
-Last reviewed: 2026-10-09.
+Last reviewed: 2026-10-13.
 
 This document records the migration decisions, current configuration behavior, and best practices agreed for this project. Bronze represents the **current Oracle state**. The application discovers source metadata, validates configuration, obtains approvals, and saves configuration to Config DB. Dynamic Fabric pipelines perform data loading and execute the configured policies.
 
@@ -9,6 +9,7 @@ This document records the migration decisions, current configuration behavior, a
 | Area | Responsibility and status |
 | --- | --- |
 | Metadata discovery and type mapping | Application; implemented |
+| Business migration workspace | Dashboard, job listing, conversation-style approvals, object results, SQL views, paginated Temporal activity, and light/dark themes are implemented. Counts describe loaded jobs and reported plans; history follows Temporal retention. Data-loading metrics are displayed only when reported by the pipeline/audit. |
 | Oracle database and ETRM descriptions | New table/base-table plans store original database comments in `Description` and separate detailed ETRM descriptions in `EtrmDescription` at table and column level. Provisioning uses only database descriptions for table/column comments; missing database comments are not filled from ETRM. Existing records are not retroactively relabeled. |
 | Approved Oracle extraction SQL | New table plans and view base-table plans persist `SourceTables.ExtractSql`, exposed by `vw_ReplicationQueue`; scheduled pipeline metadata drift checks remain an external integration responsibility |
 | Key suggestions, user-selected keys, source null/duplicate profiling | Application; implemented |

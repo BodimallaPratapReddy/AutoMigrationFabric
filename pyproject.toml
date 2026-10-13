@@ -25,6 +25,7 @@ dependencies = [
 include = ["app*", "thirdparty*", "services*"]
 
 [tool.setuptools.package-data]
+"app" = ["migration_ui.html", "static/*.js", "static/*.css"]
 "thirdparty.oracle" = ["oracle_type_mapping.json"]
 "thirdparty.sap" = ["sap_type_mapping.json"]
 

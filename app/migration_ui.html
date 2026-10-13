@@ -3,52 +3,41 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Fabric migration control</title>
-  <style>
-    :root { font-family: system-ui, Segoe UI, sans-serif; color: #183047; background: #f3f6f9; }
-    * { box-sizing: border-box; }
-    body { margin: 0; }
-    header { background: #102c42; color: white; padding: 22px max(24px, calc((100vw - 1100px)/2)); }
-    h1 { margin: 0; font-size: 1.35rem; }
-    header p { margin: 5px 0 0; color: #bcd4e0; }
-    main { max-width: 1100px; margin: 28px auto; padding: 0 20px; display: grid; gap: 20px; grid-template-columns: minmax(280px, 390px) 1fr; }
-    section { background: white; border: 1px solid #d6e1e9; border-radius: 12px; padding: 22px; box-shadow: 0 4px 12px #153a5210; }
-    h2 { margin: 0 0 16px; font-size: 1.13rem; }
-    label { display: block; font-size: .88rem; font-weight: 600; margin: 12px 0 5px; }
-    input, select, textarea { width: 100%; padding: 9px 11px; border: 1px solid #a8bac8; border-radius: 7px; font: inherit; color: inherit; background: white; }
-    textarea { min-height: 86px; resize: vertical; }
-    button { border: 0; border-radius: 7px; padding: 10px 14px; font: inherit; font-weight: 650; background: #14678a; color: white; cursor: pointer; }
-    button:hover { background: #0a5071; }
-    button.secondary { background: #e8eef2; color: #183047; }
-    button.danger { background: #a73f46; }
-    button:disabled { opacity: .5; cursor: default; }
-    .actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 15px; }
-    .wide { grid-column: 1 / -1; }
-    .hidden { display: none !important; }
-    .status { display: grid; grid-template-columns: 160px 1fr; gap: 7px 12px; margin: 0; }
-    .status dt { color: #5c7181; }
-    .status dd { margin: 0; overflow-wrap: anywhere; font-weight: 600; }
-    .badge { display: inline-block; border-radius: 20px; padding: 4px 10px; background: #e2eef4; }
-    .error { color: #aa2934; font-weight: 600; min-height: 1.5em; }
-    pre { white-space: pre-wrap; overflow-wrap: anywhere; background: #f6f9fb; border: 1px solid #dce6ec; padding: 15px; border-radius: 8px; max-height: 580px; overflow: auto; }
-    .grid-scroll { overflow-x: auto; }
-    .mapping-grid { width: 100%; border-collapse: collapse; text-align: left; }
-    .mapping-grid th, .mapping-grid td { border-bottom: 1px solid #dce6ec; padding: 10px; vertical-align: top; }
-    .mapping-grid th { background: #f2f6f8; }
-    .mapping-grid input { min-width: 155px; }
-    .mapping-grid .muted { font-size: .82rem; }
-    #unsupported-ack-wrap input { width: auto; margin-right: 8px; }
-    #primary-key-wrap input { width: auto; margin-right: 8px; }
-    .muted { color: #607685; }
-    @media (max-width: 780px) { main { grid-template-columns: 1fr; } .wide { grid-column: 1; } }
-  </style>
+  <title>AutoMigrate · Diebold Nixdorf</title>
+  <link rel="stylesheet" href="/static/workspace.css?v=20261013-pagination1">
 </head>
 <body>
-  <header><h1>Fabric migration control</h1><p>Start, review, and monitor durable migrations</p></header>
-  <main>
-    <section>
-      <h2>New migration</h2>
+<a class="skip-link" href="#workspace-main">Skip to content</a>
+<aside class="sidebar">
+  <a class="brand" href="#overview"><span class="dn-logo"><img class="dn-color" src="/static/brand/dn-color.svg" alt="Diebold Nixdorf"><img class="dn-white" src="/static/brand/dn-white.svg" alt="Diebold Nixdorf"></span><span>AutoMigrate<span class="brand-sub">Migration workspace</span></span></a>
+  <p class="nav-label">WORKSPACE</p>
+  <nav aria-label="Main navigation">
+    <button data-page="overview" class="nav-item active"><span aria-hidden="true">▦</span> Overview</button>
+    <button data-page="jobs" class="nav-item"><span aria-hidden="true">≡</span> Migration jobs <span id="nav-count" class="nav-count"></span></button>
+    <button data-page="connections" class="nav-item"><span aria-hidden="true">⇄</span> Connections</button>
+  </nav>
+  <div class="sidebar-bottom"><span class="mini-label">SOURCE TO DESTINATION</span><p>Oracle & SAP <span aria-hidden="true">→</span> Fabric</p><p class="muted">Discover. Review. Prepare.</p></div>
+</aside>
+<div class="workspace">
+  <header class="topbar"><div class="breadcrumb">Workspace <span>/</span> <strong id="breadcrumb">Overview</strong></div><div class="topbar-actions"><label for="theme-choice" class="sr-only">Color theme</label><select id="theme-choice" aria-label="Color theme"><option value="system">System theme</option><option value="light">Light theme</option><option value="dark">Dark theme</option></select><span class="workspace-label">Microsoft Fabric</span></div></header>
+  <main id="workspace-main" tabindex="-1">
+    <div id="workspace-notice" role="status" hidden></div>
+    <div id="overview-page" class="page">
+      <div class="page-heading"><div><span class="eyebrow">YOUR MIGRATIONS, AT A GLANCE</span><h1>Migration overview</h1><p class="muted">Bring your data closer. Keep every decision in view.</p></div><fluent-button appearance="primary" class="start-new">+ &nbsp; Start migration</fluent-button></div>
+      <div class="overview-toolbar"><span id="last-updated">Connecting to job history…</span><fluent-button appearance="subtle" id="refresh-jobs">Refresh</fluent-button></div>
+      <div class="metrics" id="metrics" aria-label="Migration summary"></div>
+      <div class="overview-grid"><section class="panel attention-panel"><div class="section-heading"><h2>Needs your decision</h2><span id="attention-count" class="count-tag">—</span></div><p class="muted">A quick review keeps your migrations moving.</p><div id="attention-list" class="attention-list"><p class="muted">Loading pending decisions…</p></div></section><section class="panel scope-panel"><span class="eyebrow">FROM SOURCE TO FABRIC</span><h2>Tables, views, and what’s next</h2><div id="scope-counts" class="scope-counts"></div><p id="scope-coverage" class="footnote">Loading reported object scope…</p><div class="journey"><span>Discover</span><i>→</i><span>Review</span><i>→</i><span>Prepare</span></div><div class="scope-note">Data loading runs through your separately scheduled Fabric pipelines.</div></section></div>
+      <section class="panel"><div class="section-heading"><div><h2>Recent migrations</h2><p class="muted">Open a job to see its progress, decisions, and results.</p></div><fluent-button appearance="subtle" id="view-all">View all jobs →</fluent-button></div><div id="recent-jobs" class="table-scroll"></div></section>
+      <p class="footnote" id="history-note"></p>
+    </div>
+    <div id="jobs-page" class="page" hidden>
+      <div class="page-heading"><div><span class="eyebrow">EVERY MIGRATION, ONE PLACE</span><h1>Migration jobs</h1><p class="muted">Follow active work or revisit a previous decision.</p></div><fluent-button appearance="primary" class="start-new">+ &nbsp; Start migration</fluent-button></div>
+      <section class="panel"><div class="filters"><label class="search-field"><span class="sr-only">Search migrations</span><input id="job-search" type="search" placeholder="Search object, connection, or job ID…"></label><label><span class="sr-only">Job status</span><select id="job-filter"><option value="all">All statuses</option><option value="approval">Needs approval</option><option value="running">In progress</option><option value="complete">Finished</option><option value="error">Needs attention</option></select></label><label><span class="sr-only">Source system</span><select id="source-filter"><option value="all">All sources</option><option value="ORACLE">Oracle</option><option value="SAP">SAP</option></select></label><label><span class="sr-only">Started within</span><select id="date-filter"><option value="all">Any time</option><option value="1">Last 24 hours</option><option value="7">Last 7 days</option><option value="30">Last 30 days</option></select></label></div><p id="results-count" class="muted"></p><div id="all-jobs" class="table-scroll"></div><nav class="jobs-pagination" aria-label="Migration pages"><label for="jobs-page-size">Entries per page <select id="jobs-page-size"><option value="10">10</option><option value="20" selected>20</option><option value="50">50</option></select></label><div class="pagination-controls"><span id="jobs-page-number" aria-live="polite">Page 1</span><button id="jobs-previous" type="button" class="secondary" disabled>Previous</button><button id="jobs-next" type="button" class="secondary" disabled>Next</button></div></nav></section><p class="footnote">Search, filters, and summary counts cover the current page. Use Previous and Next to browse server results. History follows Temporal retention.</p>
+    </div>
+    <div id="new-page" class="page" hidden><div class="page-heading"><div><span class="eyebrow">A GUIDED START</span><h1>New migration</h1><p class="muted">You stay in control. Review the plan before it is applied.</p></div></div>    <section id="start-section" class="panel wizard">
+      <h2>Choose your source</h2><p class="muted" id="wizard-help">Tell us what you would like to bring into Fabric.</p><ol id="wizard-steps" class="steps"><li class="active">1 &nbsp; Source</li><li>2 &nbsp; Destination</li><li>3 &nbsp; Review</li></ol>
       <form id="start-form">
+<fieldset id="wizard-source"><legend class="sr-only">Source</legend>
         <label for="connection">Source connection</label>
         <select id="connection" name="source_connection_name" required><option value="">Loading connections…</option></select>
         <div class="actions"><button id="new-connection" type="button" class="secondary">Create connection</button></div>
@@ -58,9 +47,10 @@
           <option value="">Select a source connection first</option>
         </select>
         <div id="schema-wrap"><label for="schema">Oracle source schema</label><input id="schema" name="source_schema_name"></div>
-        <label for="discovery-provider">Table discovery</label>
-        <select id="discovery-provider"><option value="OPENCODE">OpenCode agent</option><option value="BUILTIN">Built-in discovery</option></select>
-        <label id="source-label" for="source">Source table or DataSource</label><input id="source" name="source_object_name" required>
+        <details><summary>Discovery settings</summary><label for="discovery-provider">Table discovery</label>
+        <select id="discovery-provider"><option value="OPENCODE">AutoMigrate Agent</option><option value="BUILTIN">Built-in discovery</option></select>
+        </details><label id="source-label" for="source">Source table or DataSource</label><input id="source" name="source_object_name" required>
+</fieldset><fieldset id="wizard-destination" hidden><legend class="sr-only">Destination</legend>
         <label for="workspace">Fabric workspace</label>
         <select id="workspace" name="fabric_workspace_id" required disabled>
           <option value="">Loading workspaces…</option>
@@ -74,64 +64,32 @@
         <button id="lakehouse-retry" type="button" class="hidden">Retry Lakehouses</button>
         <label for="fabric-schema">Fabric schema</label><input id="fabric-schema" name="fabric_schema_name" required>
         <label for="target">Target name (optional)</label><input id="target" name="fabric_target_name">
+</fieldset><fieldset id="wizard-review" hidden><legend class="sr-only">Review your migration</legend><div id="start-summary"></div><label for="execution-mode">After approval</label><select id="execution-mode"><option value="prepare">Prepare Fabric structures</option><option value="plan">Save the plan only</option></select><details id="advanced-settings"><summary>Advanced settings</summary>
         <label for="notebook">Provisioning notebook ID (optional)</label><input id="notebook" name="provisioning_notebook_id" value="ad26f3ef-ae33-41d0-af9c-100075accc29" placeholder="UUID, or leave blank">
         <p class="muted">Without a notebook ID, the workflow saves the approved plan and stops before provisioning. Data loading runs later in the separately scheduled replication pipeline.</p>
+</details>
         <label for="requester">Requested by (optional)</label><input id="requester" name="requested_by">
-        <div class="actions"><button type="submit">Start migration</button></div>
+        </fieldset><p id="start-error" class="error" role="alert"></p><div class="wizard-actions"><button type="button" id="wizard-back" class="secondary" hidden>Back</button><button type="button" id="wizard-next">Continue</button><button type="submit" id="start-submit" hidden>Start discovery</button></div>
       </form>
-    </section>
-    <section>
-      <h2>Migration status</h2>
-      <label for="lookup">Workflow ID</label><input id="lookup" placeholder="oracle-table-…">
-      <div class="actions"><button id="load" type="button" class="secondary">Load status</button><button id="cancel" type="button" class="danger hidden">Cancel migration</button></div>
-      <p id="message" class="error" role="alert"></p>
-      <p id="empty" class="muted">Start a migration or enter a workflow ID.</p>
-      <dl id="status" class="status hidden"></dl>
-      <p id="agent-summary" role="status"></p>
-    </section>
-    <section id="connection-section" class="wide hidden">
-      <h2>Create source connection</h2>
-      <p class="muted">Connection details, including the password, are saved in Config DB. Restrict access to that database and use HTTPS when accessing this page remotely.</p>
-      <form id="connection-form">
-        <label for="connection-type">Source type</label>
-        <select id="connection-type" name="source_type"><option value="ORACLE">Oracle</option><option value="SAP_ECC">SAP ECC</option></select>
-        <label for="connection-name">Connection name</label><input id="connection-name" name="connection_name" maxlength="200" required>
-        <label for="connection-username">Username</label><input id="connection-username" name="username" autocomplete="off" required>
-        <label for="connection-password">Password</label><input id="connection-password" name="password" type="password" autocomplete="new-password" required>
-        <div id="oracle-connection-fields">
-          <label for="oracle-dsn">Oracle DSN</label><input id="oracle-dsn" name="dsn" placeholder="host:1521/service">
-          <p class="muted">Use a DSN, or fill in host and service name below.</p>
-          <label for="oracle-host">Oracle host</label><input id="oracle-host" name="oracle_host">
-          <label for="oracle-port">Oracle port</label><input id="oracle-port" name="oracle_port" type="number" min="1" max="65535" value="1521">
-          <label for="oracle-service">Service name</label><input id="oracle-service" name="service_name">
-        </div>
-        <div id="sap-connection-fields" class="hidden">
-          <label for="sap-host">SAP host</label><input id="sap-host" name="sap_host" placeholder="sap.example.com">
-          <label for="sap-port">SAP HTTPS port</label><input id="sap-port" name="sap_port" type="number" min="1" max="65535">
-          <label for="sap-client">SAP client</label><input id="sap-client" name="sap_client" placeholder="100">
-        </div>
-        <label for="connection-tags">Tags (optional, comma separated)</label><input id="connection-tags" name="tags">
-        <p id="connection-message" class="error" role="alert"></p>
-        <div class="actions"><button type="submit">Save connection</button><button id="close-connection" type="button" class="secondary">Close</button></div>
-      </form>
-    </section>
-    <section id="agent-section" class="wide hidden">
-      <h2>Agent discovery</h2>
-      <p id="agent-session" class="muted"></p>
+    </section></div>
+    <div id="connections-page" class="page" hidden><div class="page-heading"><div><span class="eyebrow">CONNECTED SOURCES</span><h1>Connections</h1><p class="muted">Your available Oracle and SAP systems.</p></div><fluent-button appearance="primary" id="add-connection">+ &nbsp; Add connection</fluent-button></div><section class="panel"><div id="connection-list" class="table-scroll"></div></section></div>
+    <div id="detail-page" class="page" hidden><button class="back-link" id="back-jobs">← All migrations</button><div class="page-heading"><div><span id="detail-kicker" class="eyebrow">MIGRATION JOB</span><h1 id="detail-title">Loading migration…</h1><p id="detail-subtitle" class="muted"></p></div><div class="actions"><span id="detail-badge"></span><fluent-button id="download-summary">Download summary</fluent-button></div></div><ol id="job-stages" class="stage-tracker"></ol><div class="detail-tabs" role="tablist" aria-label="Job details"><button role="tab" aria-selected="true" data-tab="conversation">Conversation</button><button role="tab" aria-selected="false" data-tab="objects">Objects <span id="object-tab-count"></span></button><button role="tab" aria-selected="false" data-tab="scripts">Scripts</button><button role="tab" aria-selected="false" data-tab="activity">Activity</button></div><div class="detail-layout"><div class="detail-content"><div id="conversation-tab" role="tabpanel"><div id="conversation-history"></div>    <section id="agent-section" class="wide hidden">
+      <span class="eyebrow">MIGRATION ASSISTANT</span><h2 id="agent-heading">Preparing your migration</h2><p id="agent-explanation" class="muted"></p>
+      <details class="technical"><summary>Discovery session</summary><p id="agent-session" class="muted"></p></details>
       <p id="agent-validation" class="error"></p>
-      <pre id="agent-progress" aria-live="polite"></pre>
+      <div id="agent-progress" aria-live="polite"></div>
+      <details id="agent-report-details"><summary id="agent-report-label">Agent report</summary><pre id="agent-report"></pre></details>
       <form id="agent-form" class="hidden">
         <div id="agent-fields"></div>
         <label for="agent-actor">Your name</label><input id="agent-actor" required>
         <p id="agent-error" class="error" role="alert"></p>
         <button id="agent-submit" type="submit">Send answer to agent</button>
       </form>
-      <details><summary>View agent plan</summary><pre id="agent-report"></pre></details>
-    </section>
-    <section id="review-section" class="wide hidden">
-      <h2 id="review-title">Review</h2>
+
+    </section>    <section id="review-section" class="wide hidden">
+      <span class="eyebrow">YOUR DECISION</span><h2 id="review-title">Review</h2><p id="review-explanation" class="muted"></p><div id="review-readable"></div>
       <div id="view-bundle-wrap" class="hidden"></div>
-      <pre id="review"></pre>
+      <details class="technical"><summary>Technical plan details</summary><pre id="review"></pre></details>
       <div id="runtime-grid-wrap" class="hidden">
         <p id="runtime-plan-summary" class="muted"></p>
         <div class="grid-scroll">
@@ -219,16 +177,49 @@
         <button id="feedback-send" type="button" class="secondary hidden">Submit feedback</button>
         <button id="reject" type="button" class="danger">Reject</button>
       </div>
-    </section>
-    <section id="audit-section" class="wide hidden">
-      <h2>Execution monitor</h2>
-      <pre id="audit"></pre>
-    </section>
-    <section id="provisioning-report-section" class="wide hidden">
+    </section><div id="outcome-card" class="panel"></div></div><div id="objects-tab" role="tabpanel" hidden><section class="panel"><h2>Tables & views</h2><p class="muted">Planned scope and recorded outcomes, object by object.</p><div id="object-summary" class="object-totals"></div><div id="object-list"></div></section>    <section id="provisioning-report-section" class="wide hidden">
       <h2>Provisioning report</h2>
-      <pre id="provisioning-report"></pre>
-    </section>
+      <details><summary>Raw provisioning report</summary><pre id="provisioning-report"></pre></details>
+    </section></div><div id="scripts-tab" role="tabpanel" hidden><section class="panel"><h2>Migration scripts</h2><p class="muted">SQL and code supplied by this migration. Availability depends on the workflow stage.</p><div id="script-list"></div></section></div><div id="activity-tab" role="tabpanel" hidden><section class="panel"><div class="section-heading"><h2>Activity log</h2><fluent-button id="refresh-events">Refresh</fluent-button></div><div id="activity-list"></div><fluent-button id="load-more-events" hidden>Load more events</fluent-button></section>    <section id="audit-section" class="wide hidden">
+      <h2>Execution monitor</h2>
+      <details><summary>Raw audit data</summary><pre id="audit"></pre></details>
+    </section></div></div>    <section id="job-summary" class="panel">
+      <h2>Job summary</h2><div id="job-facts"></div><details><summary>Technical details</summary>
+      <label for="lookup">Workflow ID</label><input id="lookup" placeholder="oracle-table-…">
+      <div class="actions"><button id="load" type="button" class="secondary">Load status</button><button id="cancel" type="button" class="danger hidden">Cancel migration</button></div>
+      <p id="message" class="error" role="alert"></p>
+      <p id="empty" class="muted">Start a migration or enter a workflow ID.</p>
+      <dl id="status" class="status hidden"></dl>
+      <p id="agent-summary" role="status"></p>
+</details>    </section></div></div>
   </main>
+</div>
+<dialog id="connection-dialog" aria-label="Create source connection">    <section id="connection-section" class="wide hidden">
+      <h2>Create source connection</h2>
+      <p class="muted">Connection details, including the password, are saved in Config DB. Restrict access to that database and use HTTPS when accessing this page remotely.</p>
+      <form id="connection-form">
+        <label for="connection-type">Source type</label>
+        <select id="connection-type" name="source_type"><option value="ORACLE">Oracle</option><option value="SAP_ECC">SAP ECC</option></select>
+        <label for="connection-name">Connection name</label><input id="connection-name" name="connection_name" maxlength="200" required>
+        <label for="connection-username">Username</label><input id="connection-username" name="username" autocomplete="off" required>
+        <label for="connection-password">Password</label><input id="connection-password" name="password" type="password" autocomplete="new-password" required>
+        <div id="oracle-connection-fields">
+          <label for="oracle-dsn">Oracle DSN</label><input id="oracle-dsn" name="dsn" placeholder="host:1521/service">
+          <p class="muted">Use a DSN, or fill in host and service name below.</p>
+          <label for="oracle-host">Oracle host</label><input id="oracle-host" name="oracle_host">
+          <label for="oracle-port">Oracle port</label><input id="oracle-port" name="oracle_port" type="number" min="1" max="65535" value="1521">
+          <label for="oracle-service">Service name</label><input id="oracle-service" name="service_name">
+        </div>
+        <div id="sap-connection-fields" class="hidden">
+          <label for="sap-host">SAP host</label><input id="sap-host" name="sap_host" placeholder="sap.example.com">
+          <label for="sap-port">SAP HTTPS port</label><input id="sap-port" name="sap_port" type="number" min="1" max="65535">
+          <label for="sap-client">SAP client</label><input id="sap-client" name="sap_client" placeholder="100">
+        </div>
+        <label for="connection-tags">Tags (optional, comma separated)</label><input id="connection-tags" name="tags">
+        <p id="connection-message" class="error" role="alert"></p>
+        <div class="actions"><button type="submit">Save connection</button><button id="close-connection" type="button" class="secondary">Close</button></div>
+      </form>
+    </section></dialog>
   <script>
     const $ = id => document.getElementById(id);
     let current = null;
@@ -593,7 +584,12 @@
     });
     $('close-connection').addEventListener('click', () => $('connection-section').classList.add('hidden'));
     async function request(path, options) {
-      const response = await fetch(path, {cache: 'no-store', ...options});
+      if (typeof window !== 'undefined' && (window.migrationPreview || new URLSearchParams(window.location.search).get('preview') === 'approvals') &&
+          options?.method && options.method !== 'GET') {
+        throw new Error('This is a read-only approval preview. No decisions can be submitted.');
+      }
+      const signal = typeof AbortSignal !== 'undefined' && AbortSignal.timeout ? AbortSignal.timeout(30000) : undefined;
+      const response = await fetch(path, {cache: 'no-store', signal, ...options});
       const body = await response.json().catch(error => {
         if (error.name === 'AbortError') throw error;
         return {};
@@ -631,7 +627,12 @@
       } catch (error) { $('connection-message').textContent = error.message; }
     });
     function renderAgent() {
-      $('agent-section').classList.toggle('hidden', !current.agent_session_id);
+      const needsRevision=current.phase==='WAITING_FOR_AGENT_REVISION';
+      $('agent-heading').textContent=needsRevision?'Discovery needs attention':'AutoMigrate Agent request';
+      $('agent-explanation').textContent=needsRevision?'The agent has not returned a valid migration plan. Column mappings are not available for approval yet. Read the report below, resolve the blocker, then send instructions to the agent.':'';
+      $('agent-submit').textContent=needsRevision?'Send instructions to agent':'Send answer to agent';
+
+      $('agent-section').classList.toggle('hidden', !current.agent_session_id || current.status !== 'RUNNING');
       $('agent-session').textContent = current.agent_session_id || '';
       $('agent-validation').textContent = current.agent_validation_error || '';
       $('agent-report').textContent = current.agent_report || '';
@@ -650,6 +651,7 @@
       const req = current.agent_request;
       const key = `${current.workflow_id}:${revision ? current.agent_report : req?.id}`;
       if ($('agent-fields').dataset.requestId === key) return;
+      $('agent-report-details').open=revision;
       const container = $('agent-fields'); container.replaceChildren();
       $('agent-error').textContent = '';
       $('agent-submit').disabled = false;
@@ -660,7 +662,7 @@
         const label = document.createElement('label'); label.textContent = field.title || field.key;
         const help = document.createElement('p'); help.textContent = field.description || ''; help.className = 'muted';
         if (field.type === 'external' || field.when?.length || field.hidden) {
-          help.textContent = 'This form requires the OpenCode interface. Resolve it there; this page will continue polling.';
+          help.textContent = 'This form requires the AutoMigrate Agent interface. Resolve it there; this page will continue polling.';
           container.append(label, help); $('agent-submit').disabled = true; continue;
         }
         let input;
@@ -767,7 +769,7 @@
         title.textContent = `${identity} → ${view.target_name}`;
         const dependencies = document.createElement('p'); dependencies.textContent = 'Depends on: ' + view.dependencies.join(', ');
         const source = document.createElement('pre'); source.textContent = 'Oracle source SQL\n' +
-          current.review.oracle_view_definitions[identity];
+          (current.review.oracle_view_definitions || current.review.source_view_definitions || {})[identity] || 'Source SQL not supplied';
         const target = document.createElement('pre'); target.textContent = 'Proposed Spark SQL\n' + view.spark_sql;
         const notes = document.createElement('p'); notes.textContent = view.translation_notes.join('\n');
         details.append(title, dependencies, source, target, notes); container.append(details);
@@ -779,7 +781,16 @@
       if (!id || refreshInProgress) return;
       refreshInProgress = true;
       try {
-        current = await request(`/migrations/${encodeURIComponent(id)}`);
+        let nextState = await request(`/migrations/${encodeURIComponent(id)}`);
+        if (typeof window !== 'undefined' && window.migrationPreview)
+          nextState = window.migrationPreview.transform(nextState);
+        if (id !== $('lookup').value.trim()) return;
+        const nextReviewKey=JSON.stringify([nextState.workflow_id,nextState.phase,nextState.plan_version,nextState.analysis_version,nextState.review?.source,nextState.review?.base_table_index]);
+        if($('approve').dataset.submittedReview&&$('approve').dataset.submittedReview!==nextReviewKey){
+          delete $('approve').dataset.submittedReview;
+          for(const buttonId of ['approve','reject','edit-columns','edit-primary-key','feedback-send'])$(buttonId).disabled=false;
+        }
+        current = nextState;
         renderAgent();
         setMessage('');
         $('empty').classList.add('hidden'); $('status').classList.remove('hidden');
@@ -798,9 +809,11 @@
         $('provisioning-report-section').classList.toggle('hidden', !current.provisioning_report);
         if (current.provisioning_report)
           $('provisioning-report').textContent = JSON.stringify(current.provisioning_report, null, 2);
-        if (current.plan_guid) {
+        let workspaceAudit = null;
+        if (current.plan_guid && !(typeof window !== 'undefined' && window.migrationPreview)) {
           try {
             const audit = await request(`/migrations/${encodeURIComponent(id)}/audit`);
+            workspaceAudit = audit;
             $('audit').textContent = JSON.stringify(audit, null, 2);
             $('audit-section').classList.remove('hidden');
           } catch (_) { $('audit-section').classList.add('hidden'); }
@@ -920,6 +933,7 @@
           $('feedback-wrap').classList.toggle('hidden', !canFeedback);
           $('feedback-send').classList.toggle('hidden', !canFeedback);
         }
+        if (typeof window !== 'undefined') window.migrationWorkspace?.update(current, workspaceAudit);
         if (current.status !== 'RUNNING' && timer) { clearInterval(timer); timer = null; }
       } catch (error) {
         if (error.status === 404 || error.status === 410) {
@@ -967,12 +981,12 @@
           method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(data)});
         $('lookup').value = started.workflow_id;
         localStorage.setItem('migrationWorkflowId', started.workflow_id);
-        setMessage(''); await trackWorkflow();
+        setMessage(''); if (typeof window !== 'undefined') window.migrationWorkspace?.started(started.workflow_id); await trackWorkflow();
       } catch (error) { setMessage(error.message); }
     });
     $('load').addEventListener('click', trackWorkflow);
     async function sendAction(action) {
-      if (!current) return;
+      if (!current || $('approve').disabled) return;
       const analysis = current.phase === 'WAITING_FOR_ANALYSIS_APPROVAL';
       const mapping = current.phase === 'WAITING_FOR_COLUMN_MAPPING_APPROVAL';
       const primaryKey = current.phase === 'WAITING_FOR_PRIMARY_KEY_APPROVAL';
@@ -1039,10 +1053,22 @@
         if (!body.decision) { setReviewMessage('Choose a target change action.'); return; }
       }
       if (action === 'feedback' && !body.message) { setReviewMessage('Enter feedback.'); return; }
+      const footerButtons=['approve','reject','edit-columns','edit-primary-key','feedback-send'].map(id=>$(id)).filter(Boolean);
+      const previousDisabled=footerButtons.map(button=>button.disabled);
+      const submittedKey=JSON.stringify([current.workflow_id,current.phase,current.plan_version,current.analysis_version,current.review?.source,current.review?.base_table_index]);
+      $('approve').dataset.submittedReview=submittedKey;
+      footerButtons.forEach(button=>button.disabled=true);
+      setReviewMessage('Submitting your decision…');
       try { await request(`/migrations/${encodeURIComponent(current.workflow_id)}/${endpoint}`, {
         method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)});
         $('feedback').value = ''; setReviewMessage('Action accepted. Waiting for workflow state…'); setTimeout(refresh, 800);
-      } catch (error) { setReviewMessage(error.message); }
+      } catch (error) {
+        if($('approve').dataset.submittedReview===submittedKey){
+          delete $('approve').dataset.submittedReview;
+          footerButtons.forEach((button,index)=>button.disabled=previousDisabled[index]);
+          setReviewMessage(error.message);
+        }
+      }
     }
     $('approve').addEventListener('click', () => sendAction('approve'));
     $('reject').addEventListener('click', () => sendAction('reject'));
@@ -1064,17 +1090,18 @@
       try { await request(`/migrations/${encodeURIComponent(current.workflow_id)}/cancel`, {method:'POST'}); setMessage('Cancellation requested.'); setTimeout(refresh, 800); }
       catch (error) { setMessage(error.message); }
     });
-    const linked = new URLSearchParams(window.location.search).get('workflow_id');
-    const saved = linked || localStorage.getItem('migrationWorkflowId');
+    window.migrationControl = {
+      async open(id) { $('lookup').value = id; await trackWorkflow(); },
+      getState() { return current; },
+      connections() { return connections; },
+      workspaces() { return workspaces; },
+      stop() { if (timer) clearInterval(timer); timer = null; },
+      refresh,
+    };
     loadConnections();
     loadWorkspaces();
-    if (saved) {
-      $('lookup').value = saved;
-      trackWorkflow().then(() => {
-        if (linked && !$('review-section').classList.contains('hidden'))
-          $('review-section').scrollIntoView({behavior:'smooth'});
-      });
-    }
   </script>
+<script type="module" src="/static/workspace.js?v=20261013-pagination1"></script>
 </body>
 </html>
+

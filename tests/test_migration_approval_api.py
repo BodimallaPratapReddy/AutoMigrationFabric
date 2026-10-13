@@ -189,6 +189,10 @@ def test_oracle_mapping_and_watermark_are_separate_approvals():
         response = client.post("/migrations/oracle-test/approve-columns", json={
             "approved_by": "reviewer", "columns": [{"name": "ORDER_ID", "fabric_type": "decimal(18,0)"}]})
         assert response.status_code == 200
+        snapshot = temporal.handle.signals[0][1].pop('review_snapshot')
+        assert snapshot['phase'] == 'WAITING_FOR_COLUMN_MAPPING_APPROVAL'
+        assert snapshot['source_object_name'] == 'ORDERS'
+        assert snapshot['columns'][0]['fabric_type'] == 'STRING'
         assert temporal.handle.signals == [("command", {
             "action": "approve_columns", "actor": "reviewer", "message": None,
             "watermark_column": None,

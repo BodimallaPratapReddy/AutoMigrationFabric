@@ -56,6 +56,10 @@ test('revision blockers are prominent and live progress is separate from the rep
   vm.runInContext("current.phase='WAITING_FOR_AGENT_REVISION';current.agent_validation_error='Verify watermark';current.agent_report='plan';renderAgent()",h.context);
   assert.match(h.$('agent-summary').textContent,/paused.*Verify watermark/);
   assert.equal(h.$('agent-validation').textContent,'Verify watermark');
+  assert.equal(h.$('agent-heading').textContent,'Discovery needs attention');
+  assert.match(h.$('agent-explanation').textContent,/Column mappings are not available/);
+  assert.equal(h.$('agent-report-details').open,true);
+  assert.equal(h.$('agent-submit').textContent,'Send instructions to agent');
   vm.runInContext("current.phase='WAITING_FOR_AGENT';current.agent_progress=[{tool:'oracle-sqlcl',status:'running'}];renderAgent()",h.context);
   assert.match(h.$('agent-summary').textContent,/oracle-sqlcl/);
   assert.equal(h.$('agent-progress').textContent,'oracle-sqlcl: running');
